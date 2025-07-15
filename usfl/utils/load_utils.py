@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Any
+from typing import Dict, Any, List
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, AutoConfig
 from usfl.llm import (
@@ -76,7 +76,7 @@ def load_client(model_dir, client_args, split_point):
     return head, tail, tokenizer
 
 
-def load_dataset(dataset_name, tokenizer, client_ids):
+def load_dataset(dataset_name, tokenizer, client_ids: List[int]):
     usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
         dataset_name=dataset_name,
