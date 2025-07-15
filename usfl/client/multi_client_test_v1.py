@@ -21,7 +21,7 @@ SEED = 1234
 warnings.filterwarnings("ignore", message="To copy construct from a tensor", category=UserWarning)
 
 
-def client_worker(rank: int, args: dict, queue: mp.Queue):
+def client_worker(rank: int, args: dict):
     set_seed(SEED)
     batch_per_sync = args["batch_per_sync"]
     dataset_name = args["dataset"]
@@ -51,7 +51,7 @@ def client_worker(rank: int, args: dict, queue: mp.Queue):
 
     w_head, w_tail, avg_loss, peak_memory, client_id = client.train_batches(0, batch_per_sync)
     result = {"client_id": client_id, "avg_loss": avg_loss, "peak_memory": peak_memory}
-    queue.put(result)
+    # queue.put(result)
 
 
 def main():
@@ -69,41 +69,21 @@ def main():
     parser.add_argument("-V", "--version", type=str, default="v1")
     parser.add_argument("-BPS", "--batch_per_sync", type=int, default=2)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
-    parser.add_argument("-E", "--epochs", type=int, default=1)
+    parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=3)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     client_args = parser.parse_args()
     client_args = vars(client_args)
     num_clients = client_args["num_clients"]
-
-    queue = mp.Queue()
     # mp.set_start_method("spawn", force=True)
     print("create client processes")
     mp.spawn(
         client_worker,
-        args=(client_args, queue),
+        args=(client_args),
         nprocs=num_clients,
         join=True,
     )
-    print("start aggregation")
-    head_weights, tail_weights = [], []
-    eval_losses = []
-
-    for _ in range(num_clients):
-        result = queue.get()
-        print(f"Client {result['client_id']} - Loss: {result['avg_loss']:.4f}, Peak Mem: {result['peak_memory']:.2f} GB")
-        # head_weights.append(result["w_head"])
-        # tail_weights.append(result["w_tail"])
-        # eval_losses.append(result["avg_loss"])
-
-    w_glob_head_model = fed_average(head_weights)
-    w_glob_tail_model = fed_average(tail_weights)
-
-    print("Aggregated global models")
-    np.save(
-        f"eval_losses_num_clients_{client_args['num_clients']}_version_{client_args['version']}.npy",
-        np.array(eval_losses),
-    )
+    print("client processes done")
 
 
 if __name__ == "__main__":

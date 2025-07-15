@@ -124,14 +124,14 @@ class Client(object):
                         f"[Client {self.client_id}] update model,cuda memory: {torch.cuda.memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
                     )
                     torch.cuda.empty_cache()
-            # 发送聚合信号并等待服务器响应
-            client.send(
-                {
-                    "client_id": self.client_id,
-                    "aggregate": True,
-                    "step": batch_start + batch_per_sync,
-                }
-            )
+                # 发送聚合信号并等待服务器响应
+                client.send(
+                    {
+                        "client_id": self.client_id,
+                        "aggregate": True,
+                        "step": batch_start + batch_per_sync,
+                    }
+                )
             self.train_logger.info(f"[Client {self.client_id}] send aggregate signal")
             # server_aggregate_status = client.receive()
 
@@ -139,6 +139,14 @@ class Client(object):
 
         self.head_model.cpu()
         self.tail_model.cpu()
+        client.send(
+            {
+                "client_id": self.client_id,
+                "aggregate_client": True,
+                "head_state_dict": self.head_model.state_dict(),
+                "tail_state_dict": self.tail_model.state_dict(),
+            }
+        )
         return (
             self.head_model.state_dict(),
             self.tail_model.state_dict(),

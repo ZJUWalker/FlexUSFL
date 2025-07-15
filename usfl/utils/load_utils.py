@@ -29,9 +29,9 @@ def get_model_layer_num(model_dir: str) -> int:
         raise ValueError("Cannot find layer number")
 
 
-def load_client(model_dir, client_args, split_point):
+def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 2):
     if client_args["use_qlora_4bit"] or client_args["use_qlora_8bit"]:
-        ql_config = BitsAndBytesConfig(
+        quantization_config = BitsAndBytesConfig(
             load_in_4bit=client_args["use_qlora_4bit"],
             load_in_8bit=client_args["use_qlora_8bit"],
             bnb_4bit_quant_type="nf4",
@@ -39,9 +39,9 @@ def load_client(model_dir, client_args, split_point):
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
     else:
-        ql_config = None
+        quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=ql_config, device_map="cpu")
+    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu")
 
     if client_args["use_qlora_4bit"] or client_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)
@@ -54,17 +54,6 @@ def load_client(model_dir, client_args, split_point):
         tail_layer_num=split_point,
     )
 
-    if client_args["use_lora"]:
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=2,
-            lora_alpha=32,
-            lora_dropout=0.1,
-            target_modules=["q_proj", "k_proj", "v_proj"],
-        )
-        head = get_peft_model(head, lora_config)
-        tail = get_peft_model(tail, lora_config)
-
     if "gpt" in client_args["model"].lower():
         head, tail = load_gpt_client_models(model, split_config)
     elif "llama" in client_args["model"].lower():
@@ -73,11 +62,21 @@ def load_client(model_dir, client_args, split_point):
         head, tail = load_qwen3_client(model, split_config)
     else:
         raise ValueError(f"unsupported model card {client_args['model']}")
+    if client_args["use_lora"]:
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=8,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            target_modules=["q_proj", "k_proj", "v_proj"],
+        )
+        head = get_peft_model(head, lora_config)
+        tail = get_peft_model(tail, lora_config)
     return head, tail, tokenizer
 
 
-def load_dataset(dataset_name, tokenizer, client_ids: List[int]):
-    usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
+def load_dataset(dataset_name: str = 'gsm8k', tokenizer: AutoTokenizer = None, client_ids: List[int] = [0]):
+    # usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
@@ -93,10 +92,10 @@ def load_dataset(dataset_name, tokenizer, client_ids: List[int]):
 def load_server_model(
     model_dir: str,
     server_args: Dict[str, Any],
-    split_point: int,
+    split_point: int = 2,
 ) -> nn.Module:
     if server_args["use_qlora_4bit"] or server_args["use_qlora_8bit"]:
-        ql_config = BitsAndBytesConfig(
+        quantization_config = BitsAndBytesConfig(
             load_in_4bit=server_args["use_qlora_4bit"],
             load_in_8bit=server_args["use_qlora_8bit"],
             bnb_4bit_quant_type="nf4",
@@ -104,9 +103,9 @@ def load_server_model(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
     else:
-        ql_config = None
+        quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=ql_config, device_map="cpu")
+    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu")
     model.train()
     if server_args["use_qlora_4bit"] or server_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)
@@ -116,7 +115,7 @@ def load_server_model(
                 r=8,
                 lora_alpha=32,
                 lora_dropout=0.1,
-                target_modules=["q_proj", "v_proj"],
+                target_modules=["q_proj", "k_proj", "v_proj"],
             )
             model = get_peft_model(model, lora_config)
 
