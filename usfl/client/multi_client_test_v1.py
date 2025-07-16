@@ -48,9 +48,9 @@ def client_worker(rank: int, args: dict):
         dataset_train=data["train"],
         dataset_test=data["test"],
     )
-
-    w_head, w_tail, avg_loss, peak_memory, client_id = client.train_batches(0, batch_per_sync)
-    result = {"client_id": client_id, "avg_loss": avg_loss, "peak_memory": peak_memory}
+    client.train_epoch()
+    # w_head, w_tail, avg_loss, peak_memory, client_id = client.train_batches(0, batch_per_sync)
+    # result = {"client_id": client_id, "avg_loss": avg_loss, "peak_memory": peak_memory}
     # queue.put(result)
 
 
@@ -68,6 +68,7 @@ def main():
     parser.add_argument("-S", "--step", type=int, default=20)
     parser.add_argument("-V", "--version", type=str, default="v1")
     parser.add_argument("-BPS", "--batch_per_sync", type=int, default=2)
+    parser.add_argument("-BPSC", "--batch_per_sync_client", type=int, default=1)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
     parser.add_argument("-SP", "--split_point", type=int, default=3)
@@ -79,7 +80,7 @@ def main():
     print("create client processes")
     mp.spawn(
         client_worker,
-        args=(client_args),
+        args=(client_args,),
         nprocs=num_clients,
         join=True,
     )

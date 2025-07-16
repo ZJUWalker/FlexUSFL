@@ -2,6 +2,7 @@ import torch
 import random
 import numpy as np
 import copy
+from typing import Dict, List
 
 
 def set_seed(seed: int, cuda: bool = True, deterministic: bool = True) -> None:
@@ -19,7 +20,7 @@ def set_seed(seed: int, cuda: bool = True, deterministic: bool = True) -> None:
             print(torch.cuda.get_device_name(0))
 
 
-def fed_average(w: list) -> dict:
+def fed_average(w: List[Dict]) -> Dict:
     """
     FedAvg: Federated Averaging
     """
@@ -29,3 +30,15 @@ def fed_average(w: list) -> dict:
             w_avg[k] += w[i][k]
         w_avg[k] = torch.div(w_avg[k], len(w))
     return w_avg
+
+
+def fed_avg_params(params: List[List[torch.nn.Parameter]]) -> List[torch.nn.Parameter]:
+    """
+    FedAvgParams: Federated Averaging of model parameters
+    """
+    avg_params: List[torch.nn.Parameter] = []
+    for i in range(len(params[0])):
+        param_list = [p[i] for p in params]
+        avg_param = torch.stack(param_list).mean(dim=0)
+        avg_params.append(avg_param)
+    return avg_params

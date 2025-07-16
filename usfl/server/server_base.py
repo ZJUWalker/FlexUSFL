@@ -12,7 +12,7 @@ import copy
 
 import torch.utils.checkpoint
 from usfl.socket import SocketCommunicator
-from usfl.utils.exp import fed_average
+from usfl.utils.exp import fed_avg_params, fed_average
 
 __all__ = ["ServerV1", "ServerV2", "ServerV3"]
 
@@ -32,9 +32,17 @@ class ServerBase:
         self.num_clients = num_clients
         self.logger: logging.Logger = logger
         self.communicator = SocketCommunicator(is_server=True, port=server_args["port"], buffer_size=server_args["buffer_size"])
-        self.aggregate_lock = threading.Lock()  # 用于同步聚合操作
-        self.aggregate_count = 0  # 跟踪聚合信号的计数器
-        self.aggregate_event = threading.Event()  # 用于通知聚合完成
+        self.aggregate_server_lock = threading.Lock()  # 用于同步聚合操作
+        self.aggregate_server_count = 0  # 跟踪聚合信号的计数器
+        self.aggregate_server_event = threading.Event()  # 用于通知聚合完成
+        # --------------------------------------------------------------------------
+        self.aggregate_client_lock = threading.Lock()  # 用于同步聚合操作
+        self.aggregate_client_count = 0  # 跟踪聚合信号的计数器
+        self.aggregate_client_event = threading.Event()  # 用于通知聚合完成
+        self.client_head_model_params: Dict[int, List[nn.Parameter]] = {}  # 用于保存客户端模型的字典
+        self.client_tail_model_params: Dict[int, List[nn.Parameter]] = {}  # 用于保存客户端模型的字典
+        self.client_model_losses: Dict[int, float] = {}  # 用于保存客户端模型的损失
+        # --------------------------------------------------------------------------
         self.activation_queue: Queue = Queue()  # 用于接收客户端的激活信号
         self.server_activation_queues: Dict[int, Queue] = {cid: queue.Queue() for cid in range(self.num_clients)}  # 用于发送给客户端的激活信号
         self.gradient_queue: Queue = Queue()  # 用于接收客户端的梯度信号
@@ -86,10 +94,41 @@ class ServerBase:
         self.logger.info(f"All {self.num_clients} clients connected")
         pass
 
-    def _reset_aggregate_count(self) -> None:
-        with self.aggregate_lock:
-            self.aggregate_count = 0
-            self.aggregate_event.clear()
+    def _reset_server_aggregate_server_count(self) -> None:
+        with self.aggregate_server_lock:
+            self.aggregate_server_count = 0
+            self.aggregate_server_event.clear()
+
+    def _handle_aggregate_client_models(self, data: Dict) -> Dict[str, Any]:
+        client_id = data['client_id']
+        with self.client_lock:
+            self.client_head_model_params[client_id] = data['head_params']
+            self.client_tail_model_params[client_id] = data['tail_params']
+            self.client_model_losses[client_id] = data['loss']
+            self.aggregate_client_count += 1
+            self.logger.info(f"Client aggregate count: {self.aggregate_client_count}/{self.num_clients}")
+            if self.aggregate_client_count == self.num_clients:
+                # aggregate the client models
+                head_params_avg, tail_params_avg, loss = self._aggregate_client_models()
+                # Send acknowledgment to all clients
+                for cid in range(self.num_clients):
+                    self._send_to_client(
+                        cid, {"status": "aggregate_client_complete", "head_params": head_params_avg, "tail_params": tail_params_avg, "loss": loss}
+                    )
+            # else:
+            #     self._send_to_client(client_id, {"status": "waiting_for_others"})
+
+    def _aggregate_client_models(self) -> Dict:
+        with self.aggregate_client_lock:
+            head_params_avg = fed_avg_params(list(self.client_head_model_params.values()))
+            tail_params_avg = fed_avg_params(list(self.client_tail_model_params.values()))
+            avg_loss = sum(self.client_model_losses.values()) / len(self.client_model_losses)
+            self.aggregate_client_count = 0
+            self.aggregate_client_event.clear()
+            self.client_head_model_params.clear()
+            self.client_tail_model_params.clear()
+            self.logger.info(f"Aggregated client models finished, loss: {avg_loss},shape: {[p.shape for p in head_params_avg+tail_params_avg]}")
+            return head_params_avg, tail_params_avg, avg_loss
 
     def _send_to_client(self, client_id: int, response: Dict) -> bool:
         for conn, addr, cid in self.clients:
@@ -167,11 +206,11 @@ class ServerV1(ServerBase):
                 elif "aggregate" in data:
                     self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
                     with self.client_lock:
-                        self.aggregate_count += 1
-                        self.logger.info(f"Aggregate count: {self.aggregate_count}/{self.num_clients}")
-                        if self.aggregate_count == self.num_clients:
+                        self.aggregate_server_count += 1
+                        self.logger.info(f"Server aggregate count: {self.aggregate_server_count}/{self.num_clients}")
+                        if self.aggregate_server_count == self.num_clients:
                             response = self._trunk_models_aggregated()
-                            self._reset_aggregate_count()
+                            self._reset_server_aggregate_server_count()
                             # log memory usage
                             self.matrix_logger.info(
                                 f"{data['step']:^5}|"
@@ -185,6 +224,10 @@ class ServerV1(ServerBase):
                                 self._send_to_client(cid, {"status": "aggregate_complete"})
                         else:
                             self._send_to_client(client_id, {"status": "waiting_for_others"})
+                elif 'aggregate_client' in data:
+                    self.logger.info(f"Received client aggregation request from client_id={client_id} (addr={addr})")
+                    self._handle_aggregate_client_models(data)
+
         except Exception as e:
             self.logger.error(f"Client {addr} (client_id={client_id}) error: {e}")
         finally:
@@ -261,18 +304,30 @@ class ServerV1(ServerBase):
     def _trunk_models_aggregated(self) -> dict:
         try:
             self.logger.info("Acquiring aggregate lock")
-            with self.aggregate_lock:
+            with self.aggregate_server_lock:
                 self.logger.info("Aggregate lock acquired")
-                w_trunk_models = []
+                w_trunk_model_params = []
                 for client_id in range(self.num_clients):
-                    self.trunk_models[client_id].cpu()
-                    w_trunk_models.append(self.trunk_models[client_id].state_dict())
-                w_glob_trunk_model = fed_average(w_trunk_models)
+                    w_trunk_model_params.append(list(filter(lambda p: p.requires_grad, self.trunk_models[client_id].parameters())))
+                avg_trunk_model_params = fed_avg_params(w_trunk_model_params)
                 for client_id in range(self.num_clients):
-                    self.trunk_models[client_id].load_state_dict(w_glob_trunk_model)
-                    self.trunk_models[client_id].to(self.server_device).train()
+                    i = 0
+                    for p in self.trunk_models[client_id].parameters():
+                        if p.requires_grad:
+                            p.data.copy_(avg_trunk_model_params[i], non_blocking=True)
+                            i += 1
+                torch.cuda.synchronize(device=self.server_device)
+                torch.cuda.empty_cache()
+                # w_trunk_models = []
+                # for client_id in range(self.num_clients):
+                #     self.trunk_models[client_id].cpu()
+                #     w_trunk_models.append(self.trunk_models[client_id].state_dict())
+                # w_glob_trunk_model = fed_average(w_trunk_models)
+                # for client_id in range(self.num_clients):
+                #     self.trunk_models[client_id].load_state_dict(w_glob_trunk_model)
+                #     self.trunk_models[client_id].to(self.server_device).train()
                 self.logger.info("Completed trunk models aggregation")
-            self.aggregate_event.set()  # 通知聚合完成
+            self.aggregate_server_event.set()  # 通知聚合完成
             return {"status": "aggregation_completed"}
         except Exception as e:
             self.logger.error(f"Aggregation failed: {e}")
@@ -352,7 +407,7 @@ class ServerV2(ServerBase):
         try:
             conn.settimeout(60.0)
             while True:
-                data = self.communicator.receive(conn)
+                data: Dict = self.communicator.receive(conn)
                 if data is None:
                     self.logger.info(f"Client {addr} disconnected")
                     break
@@ -378,11 +433,11 @@ class ServerV2(ServerBase):
                         self._send_to_client(client_id, response)
                 elif "aggregate" in data:
                     self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
-                    with self.aggregate_lock:
-                        self.aggregate_count += 1
-                        self.logger.info(f"Aggregate count: {self.aggregate_count}/{self.server_args['num_clients']}")
-                        if self.aggregate_count == self.server_args["num_clients"]:
-                            self._reset_aggregate_count()
+                    with self.aggregate_server_lock:
+                        self.aggregate_server_count += 1
+                        self.logger.info(f"Aggregate count: {self.aggregate_server_count}/{self.server_args['num_clients']}")
+                        if self.aggregate_server_count == self.server_args["num_clients"]:
+                            self._reset_server_aggregate_server_count()
                             # log memory usage
                             self.matrix_logger.info(
                                 f"{data['step']:^5}|"
@@ -396,6 +451,9 @@ class ServerV2(ServerBase):
                                 self._send_to_client(cid, {"status": "aggregate_complete"})
                         else:
                             self._send_to_client(client_id, {"status": "waiting_for_others"})
+                elif 'aggregate_client' in data:
+                    self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
+                    self._handle_aggregate_client_models(data)
         except Exception as e:
             self.logger.error(f"Client {addr} (client_id={client_id}) error: {e}")
         finally:
