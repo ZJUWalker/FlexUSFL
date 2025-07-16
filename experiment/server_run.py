@@ -2,12 +2,12 @@ import os
 import torch
 import argparse
 from transformers import AutoConfig
-from usfl.server.server_base import ServerV1, ServerV2, ServerV3
-from usfl.server.server_loader import load_server_model, get_model_layer_num
 from usfl.utils.exp import set_seed
+from usfl.utils.load_utils import *
 from usfl.utils.log_utils import create_logger
+from usfl.server import *
 
-SEED = 1234
+SEED = 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

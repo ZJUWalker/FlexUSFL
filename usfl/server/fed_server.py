@@ -1,16 +1,9 @@
-from abc import abstractmethod
 import socket
 import threading
-import queue
 import logging
-from queue import Queue
-import time
 from typing import List, Tuple, Dict, Any, Optional
-import torch
 import torch.nn as nn
-import copy
 
-import torch.utils.checkpoint
 from usfl.socket import SocketCommunicator
 from usfl.utils.exp import fed_average
 

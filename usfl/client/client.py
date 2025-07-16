@@ -69,7 +69,7 @@ class Client(object):
                     self.train_logger.info(f"[Client {self.client_id}] send aggregate_client signal")
                     head_params = [p.cpu() for p in self.head_model.parameters() if p.requires_grad]
                     tail_params = [p.cpu() for p in self.tail_model.parameters() if p.requires_grad]
-                    self.train_logger.info(f"[Client {self.client_id}] prepare params to send {[p.shape for p in head_params + tail_params]}")
+                    # self.train_logger.info(f"[Client {self.client_id}] prepare params to send {[p.shape for p in head_params + tail_params]}")
                     peak_memory = torch.cuda.max_memory_allocated(device=self.client_device) / 1024**3
                     client.send(
                         {
@@ -83,11 +83,25 @@ class Client(object):
                     self.train_logger.info(
                         f"[Client {self.client_id}] send aggregate_client signal, batch_idx: {batch_idx}, avg_loss: {self.avg_loss.avg}, peak_memory: {peak_memory:.4f} GB"
                     )
-                    server_aggregate_status = client.receive()
+                    client_aggregate_result = client.receive()  # blocking util receive server aggregate finished signal
                     self.train_logger.info(
-                        f"[Client {self.client_id}] receive server aggregate status: {server_aggregate_status['status']},avg loss {server_aggregate_status['loss']}"
+                        f"[Client {self.client_id}] receive server aggregate status: {client_aggregate_result['status']},avg loss {client_aggregate_result['loss']}"
                     )
-                    break  # for test only
+                    # update model
+                    self._update_model_params(self.head_model, client_aggregate_result["head_params"])
+                    self._update_model_params(self.tail_model, client_aggregate_result["tail_params"])
+                    self.train_logger.info(f"[Client {self.client_id}] updated model")
+                    if batch_idx == batch_per_sync_client * 2:
+                        break  # for test only
+        pass
+
+    def _update_model_params(self, model: nn.Module, new_params: List[nn.Parameter]):
+        i = 0
+        for p in model.parameters():
+            if p.requires_grad:
+                p.data.copy_(new_params[i].data, non_blocking=True)
+                i += 1
+        torch.cuda.synchronize(device=self.client_device)
         pass
 
     def train_batch(self, batch: Dict, client: SocketCommunicator):
