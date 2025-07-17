@@ -43,28 +43,32 @@ class ServerV3(ServerV2):
     def _forward(self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: Tuple[torch.Tensor] = None):
         try:
             # self.logger.info(f"Client {client_id}: Acquiring lock for forward")
-            with self.client_lock:
-                # self.logger.info(f"Client {client_id}: Lock acquired for forward")
-                hidden_status_from_head = activation.to(self.server_device)
-                hidden_status_from_head.requires_grad_(True)
-                hidden_status_from_head.retain_grad()
-                attention_mask = attention_mask.to(self.server_device)
-                pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
-                if self.server_args["use_checkpoint"]:
-                    server_output = torch.utils.checkpoint.checkpoint(
-                        self.trunk_model.__call__,
-                        hidden_status_from_head,
-                        attention_mask,
-                        pos_emb,
-                        use_reentrant=False,
-                    )
-                else:
-                    server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
-                server_output = server_output.requires_grad_(True)
-                self.server_output_dict[client_id] = server_output
-                self.hidden_status_from_head_dict[client_id] = hidden_status_from_head
-                activation_to_tail = server_output.cpu()
-                # torch.cuda.empty_cache()
+            # with self.client_lock:
+            # self.logger.info(f"Client {client_id}: Lock acquired for forward")
+            hidden_status_from_head = activation.to(self.server_device)
+            hidden_status_from_head.requires_grad_(True)
+            hidden_status_from_head.retain_grad()
+            attention_mask = attention_mask.to(self.server_device)
+            pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
+            fwd_start_time = time.time()
+            if self.server_args["use_checkpoint"]:
+                server_output = torch.utils.checkpoint.checkpoint(
+                    self.trunk_model.__call__,
+                    hidden_status_from_head,
+                    attention_mask,
+                    pos_emb,
+                    use_reentrant=False,
+                )
+            else:
+                server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
+            torch.cuda.synchronize(self.server_device)
+            fwd_end_time = time.time()
+            self.compute_time += fwd_end_time - fwd_start_time
+            server_output = server_output.requires_grad_(True)
+            self.server_output_dict[client_id] = server_output
+            self.hidden_status_from_head_dict[client_id] = hidden_status_from_head
+            activation_to_tail = server_output.cpu()
+            # torch.cuda.empty_cache()
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
@@ -72,13 +76,17 @@ class ServerV3(ServerV2):
 
     def _backward(self, client_id: int, server_grad: torch.Tensor):
         try:
-            with self.client_lock:
-                server_grad = server_grad.to(self.server_device)
-                self.server_output_dict[client_id].backward(server_grad)
-                torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
-                grad_to_head = self.hidden_status_from_head_dict[client_id].grad.cpu()
-                torch.cuda.empty_cache()
-                # self.logger.info(f"Client {client_id}: Releasing lock for backward")
+            # with self.client_lock:
+            server_grad = server_grad.to(self.server_device)
+            bwd_start_time = time.time()
+            self.server_output_dict[client_id].backward(server_grad)
+            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+            torch.cuda.synchronize(self.server_device)
+            bwd_end_time = time.time()
+            self.compute_time += bwd_end_time - bwd_start_time
+            grad_to_head = self.hidden_status_from_head_dict[client_id].grad.cpu()
+            torch.cuda.empty_cache()
+            # self.logger.info(f"Client {client_id}: Releasing lock for backward")
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Client {client_id}: Backward pass failed: {e}")
@@ -102,8 +110,8 @@ class ServerV3(ServerV2):
                     server_activation = self._forward(
                         data["client_id"],
                         data["activation"],
-                        data["attention_mask"],
-                        data["position_embeddings"],
+                        data["attention_mask"] if "attention_mask" in data else None,
+                        data["position_embeddings"] if "position_embeddings" in data else None,
                     )
                     self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_activation": server_activation})
                     self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
@@ -130,7 +138,11 @@ class ServerV3(ServerV2):
             time.sleep(0.01)
 
     def _update_server_model(self):
-        with self.client_lock:
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.logger.info("Server model updated")
+        # with self.client_lock:
+        step_start_time = time.time()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        torch.cuda.synchronize(self.server_device)
+        step_end_time = time.time()
+        self.compute_time += step_end_time - step_start_time
+        self.logger.info("Server model updated")

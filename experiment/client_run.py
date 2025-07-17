@@ -21,8 +21,10 @@ def client_worker(rank: int, args: dict):
     model_name = args["model"]
     model_dir = os.path.join("/share/models", model_name)
     split_point = args["split_point"]
-    device = f"cuda:{rank % torch.cuda.device_count()}"
-    logger = create_logger(f"client_{rank}.log", console_output=True)
+    device = f"cuda:{rank % 3}"  # use 3 gpus
+    log_dir = f"log/{args['model']}/client_number_{args['num_clients']}/{args['version']}/client"
+    logger = create_logger(log_file_name=f"client_{rank}.log", console_output=False, log_dir=log_dir)
+    logger.info(f"client {rank} start with args: {args}")
     # ---------------load model and tokenizer --------------------------
     head, tail, tokenizer = load_client(model_dir, args, split_point)
     # -----------------load dataset------------------------------------
@@ -56,17 +58,17 @@ def main():
     parser.add_argument("-NC", "--num_clients", type=int, default=2)
     parser.add_argument("-S", "--step", type=int, default=20)
     parser.add_argument("-V", "--version", type=str, default="v1")
-    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=2)
-    parser.add_argument("-BPSC", "--batch_per_sync_client", type=int, default=1)
+    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=20)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
-    parser.add_argument("-SP", "--split_point", type=int, default=3)
+    parser.add_argument("-SP", "--split_point", type=int, default=2)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     client_args = parser.parse_args()
     client_args = vars(client_args)
     num_clients = client_args["num_clients"]
     # mp.set_start_method("spawn", force=True)
     print("create client processes")
+
     mp.spawn(
         client_worker,
         args=(client_args,),
