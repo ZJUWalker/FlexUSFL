@@ -126,6 +126,12 @@ class ServerV2(ServerBase):
                             head_params_avg, tail_params_avg, loss = self._aggregate_client_models()
                             self.aggregate_count = 0
                             self.logger.info(f"Aggregated client models finished, avg loss: {loss}")
+                            self.logger.info(
+                                f'Aggrageting server model finished, '
+                                f'total compute time: {self.compute_time:.2f}s, '
+                                f'total server aggregate time: {self.aggregate_server_time:.2f}s, '
+                                f'total clients aggregate time: {self.aggregate_client_time:.2f}s'
+                            )
                             # Send acknowledgment to all clients
                             for cid in range(self.num_clients):
                                 self._send_to_client(

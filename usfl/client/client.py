@@ -43,13 +43,14 @@ class Client(object):
         self.optimizer_tail = torch.optim.Adam(self.tail_model.parameters(), lr=self.lr)
         self.avg_loss = AverageMeter()
         self.simulate_delay = True
+        self.compute_time = 0
 
     def train_epoch(self):
         """
         Train the client model
         """
-        self.head_model.train()
-        self.tail_model.train()
+        # self.head_model.train()
+        # self.tail_model.train()
         torch.cuda.reset_peak_memory_stats(device=self.client_device)
         self.avg_loss.reset()
         batch_per_sync = self.client_args["batch_per_sync"]
@@ -86,18 +87,23 @@ class Client(object):
                     # )
                     client_aggregate_result = client.receive()  # blocking util receive server aggregate finished signal
                     self.train_logger.info(
-                        f"[Client {self.client_id} Aggregated],avg loss {client_aggregate_result['loss']:.4f},max memory: {torch.cuda.max_memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
+                        f"[Client {self.client_id} Aggregated],avg loss {client_aggregate_result['loss']:.4f},"
+                        f"max memory: {torch.cuda.max_memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
+                        f"max memory reserved: {torch.cuda.max_memory_reserved(device=self.client_device) / 1024**3:.4f} GB"
                     )
                     # update model
                     self._update_model_params(self.head_model, client_aggregate_result["head_params"])
                     self._update_model_params(self.tail_model, client_aggregate_result["tail_params"])
                     self.avg_loss.reset()
                     torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats(device=self.client_device)
                     # self.train_logger.info(f"[Client {self.client_id}] updated model")
-                    # if batch_idx == batch_per_sync * 2:
-                    #     break  # for test only
+                    if batch_idx == batch_per_sync * 2:
+                        break  # for test only
             end_time = time.time()
-            self.train_logger.info(f"[Client {self.client_id} Finished] train epoch time: {end_time - start_time:.4f} s")
+            self.train_logger.info(
+                f"[Client {self.client_id} Finished] train epoch time: {end_time - start_time:.4f} s, compute time: {self.compute_time:.4f} s"
+            )
         pass
 
     def _update_model_params(self, model: nn.Module, new_params: List[nn.Parameter]):
@@ -113,7 +119,11 @@ class Client(object):
         input_ids = batch["input_ids"].to(self.client_device)
         attention_mask = batch["attention_mask"].to(self.client_device)
         labels = batch["labels"].to(self.client_device) if "labels" in batch else input_ids
+        s = time.time()
         head_outs = self.head_model.forward(input_ids, attention_mask)
+        torch.cuda.synchronize(device=self.client_device)
+        e = time.time()
+        self.compute_time += e - s
         head_outs[0].requires_grad_(True)
         attention_mask = head_outs[1]
         head_out_to_server = {
@@ -137,16 +147,26 @@ class Client(object):
             dtype=torch.float32,
             requires_grad=True,
         )
+        s = time.time()
         output = self.tail_model.forward(
             hidden_states=activation_from_server,
             attention_mask=attention_mask,
             position_embeddings=head_outs[2] if len(head_outs) > 2 else None,
             labels=labels,
         )
+        torch.cuda.synchronize(device=self.client_device)
+        e = time.time()
+        torch.cuda.empty_cache()
+        self.compute_time += e - s
         loss = output.loss
         self.avg_loss.update(loss.item())
         # self.train_logger.info(f"[Client {self.client_id}] compute loss: {loss.item()}")
+        s = time.time()
         loss.backward()
+        torch.cuda.synchronize(device=self.client_device)
+        e = time.time()
+        torch.cuda.empty_cache()
+        self.compute_time += e - s
         grads_to_server = activation_from_server.grad.cpu()
         tail_grads_to_server = {
             "client_id": self.client_id,
@@ -162,11 +182,16 @@ class Client(object):
             device=self.client_device,
             dtype=torch.float32,
         )
+        s = time.time()
         head_outs[0].backward(grads_from_server)
         self.optimizer_head.step()
         self.optimizer_tail.step()
         self.optimizer_head.zero_grad()
         self.optimizer_tail.zero_grad()
+        torch.cuda.synchronize(device=self.client_device)
+        e = time.time()
+        torch.cuda.empty_cache()
+        self.compute_time += e - s
         # self.train_logger.info(
         #     f"[Client {self.client_id}] update model,cuda memory: {torch.cuda.memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
         # )

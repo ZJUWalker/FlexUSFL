@@ -93,6 +93,12 @@ class ServerV1(ServerBase):
                                     f"{torch.cuda.max_memory_allocated(self.server_device)/1024**3:^15.3f}|"
                                     f"{torch.cuda.max_memory_reserved(self.server_device)/1024**3:^18.3f}"
                                 )
+                                self.logger.info(
+                                    f'Aggrageting server model finished, '
+                                    f'total compute time: {self.compute_time:.2f}s, '
+                                    f'total server aggregate time: {self.aggregate_server_time:.2f}s, '
+                                    f'total clients aggregate time: {self.aggregate_client_time:.2f}s'
+                                )
                                 torch.cuda.reset_peak_memory_stats(self.server_device)
                                 # Send acknowledgment to all clients
                                 for cid in range(self.num_clients):
@@ -205,7 +211,7 @@ class ServerV1(ServerBase):
                         i += 1
             torch.cuda.synchronize(device=self.server_device)
             end_agg_time = time.time()
-            self.aggregate_time += end_agg_time - start_agg_time  # 用于记录聚合时间
+            self.aggregate_server_time += end_agg_time - start_agg_time  # 用于记录聚合时间
             torch.cuda.empty_cache()
             return {"status": "aggregation_completed"}
         except Exception as e:

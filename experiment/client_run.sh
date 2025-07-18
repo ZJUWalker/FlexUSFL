@@ -1,12 +1,15 @@
 #!/bin/bash
 
 port=8000
-for i in {1,2,4,6,8}
+for version in {"v1","v2"}
 do
-    for model in {"qwen/qwen3-0.6b","qwen/qwen3-1.7b","meta-llama/llama3.2-1b"}
+    for i in {1,2,4,6,8,16}
     do
-        echo "Running Clients with {client num $i, model $model ,USFL version=V1,LoRA=True,split_point=2}"
-        python experiment/client_run.py -NC=${i} -V=v1 -L -SP=2 -M=${model} -P=${port}
-        port=$((port + 1))
+        for model in {"meta-llama/llama3.2-1b",}
+        do
+            echo "Running Clients with {model $model ,USFL version=$version, client num $i, LoRA=True,split_point=2}"
+            python experiment/client_run.py -NC=${i} -V=${version} -L -SP=2 -M=${model} -P=${port}
+            port=$((port + 1))
+        done
     done
 done

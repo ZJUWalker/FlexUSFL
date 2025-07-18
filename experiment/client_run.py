@@ -30,7 +30,8 @@ def client_worker(rank: int, args: dict):
     # -----------------load dataset------------------------------------
     client_dataloaders = load_dataset(dataset_name, tokenizer, list(range(num_clients)))
     data = client_dataloaders[rank]
-
+    # -----------------create client----------
+    # print(f'cuda memory allocated: {torch.cuda.memory_allocated(device)/1024**3:.2f} GB')
     client = Client(
         client_args=args,
         client_id=rank,
