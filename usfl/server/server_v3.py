@@ -42,25 +42,22 @@ class ServerV3(ServerV2):
 
     def _forward(self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: Tuple[torch.Tensor] = None):
         try:
-            # self.logger.info(f"Client {client_id}: Acquiring lock for forward")
-            # with self.client_lock:
-            # self.logger.info(f"Client {client_id}: Lock acquired for forward")
             hidden_status_from_head = activation.to(self.server_device)
             hidden_status_from_head.requires_grad_(True)
             hidden_status_from_head.retain_grad()
-            attention_mask = attention_mask.to(self.server_device)
+            attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
             fwd_start_time = time.time()
-            if self.server_args["use_checkpoint"]:
-                server_output = torch.utils.checkpoint.checkpoint(
-                    self.trunk_model.__call__,
-                    hidden_status_from_head,
-                    attention_mask,
-                    pos_emb,
-                    use_reentrant=False,
-                )
-            else:
-                server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
+            # if self.server_args["use_checkpoint"]:
+            server_output = torch.utils.checkpoint.checkpoint(
+                self.trunk_model.__call__,
+                hidden_status_from_head,
+                attention_mask,
+                pos_emb,
+                use_reentrant=False,
+            )
+            # else:
+            # server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
             torch.cuda.synchronize(self.server_device)
             fwd_end_time = time.time()
             self.compute_time += fwd_end_time - fwd_start_time
@@ -68,7 +65,7 @@ class ServerV3(ServerV2):
             self.server_output_dict[client_id] = server_output
             self.hidden_status_from_head_dict[client_id] = hidden_status_from_head
             activation_to_tail = server_output.cpu()
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
@@ -80,7 +77,6 @@ class ServerV3(ServerV2):
             server_grad = server_grad.to(self.server_device)
             bwd_start_time = time.time()
             self.server_output_dict[client_id].backward(server_grad)
-            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
             torch.cuda.synchronize(self.server_device)
             bwd_end_time = time.time()
             self.compute_time += bwd_end_time - bwd_start_time
@@ -100,13 +96,16 @@ class ServerV3(ServerV2):
         while True:
             process_activation = True
             try:
-                data = self.activation_queue.get_nowait()
+                start_time = time.time()
+                data = self.activation_queue.get(180.0)
+                end_time = time.time()
+                self.idle_time += end_time - start_time
                 if data["client_id"] not in unforwarded_clients:
                     self.activation_queue.put(data)
                     time.sleep(0.001)
                     process_activation = False
                 if process_activation:
-                    self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
+                    # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
                     server_activation = self._forward(
                         data["client_id"],
                         data["activation"],
@@ -114,7 +113,7 @@ class ServerV3(ServerV2):
                         data["position_embeddings"] if "position_embeddings" in data else None,
                     )
                     self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_activation": server_activation})
-                    self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
+                    # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
                     unforwarded_clients.remove(data["client_id"])
                     unbackwarded_clients.append(data["client_id"])
 
@@ -122,11 +121,14 @@ class ServerV3(ServerV2):
                 pass
 
             try:
-                data = self.gradient_queue.get_nowait()
-                self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
+                start_time = time.time()
+                data = self.gradient_queue.get(180.0)
+                end_time = time.time()
+                self.idle_time += end_time - start_time
+                # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                 self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_gradient": d_activation_to_client})
-                self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
+                # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
 
                 unbackwarded_clients.remove(data["client_id"])
                 if len(unbackwarded_clients) == 0 and len(unforwarded_clients) == 0:
@@ -137,9 +139,14 @@ class ServerV3(ServerV2):
                 pass
             time.sleep(0.01)
 
+    @torch.no_grad()
     def _update_server_model(self):
         # with self.client_lock:
         step_start_time = time.time()
+        grads = [p.grad for p in self.trunk_model.parameters() if p.grad is not None]
+        for g in grads:
+            g.data.div_(self.num_clients)
+        torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
         self.optimizer.step()
         self.optimizer.zero_grad()
         torch.cuda.synchronize(self.server_device)

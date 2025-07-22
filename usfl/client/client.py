@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 from usfl.socket import SocketCommunicator
 from usfl.utils.dataset.exp import AverageMeter
 from typing import Dict, List, Tuple
+from usfl.utils.tensor_utils import pad_inputs
 
 
 class Client(object):
@@ -23,6 +24,7 @@ class Client(object):
         train_logger: logging.Logger,
         dataset_train: Dataset,
         dataset_test: Dataset,
+        batch_num: int,
     ):
         self.client_device = client_device
         self.client_args = client_args
@@ -33,8 +35,9 @@ class Client(object):
         self.train_logger = train_logger
         self.train_loader = dataset_train
         self.test_loader = dataset_test
+        self.batch_num = batch_num
         self.local_ep = client_args["epoch"]
-        self.lr = client_args['learning_rate']
+        self.lr = client_args["learning_rate"]
         if client_id == 0:
             print(
                 f"[Client {client_id}] after model loaded,cuda memory: {torch.cuda.memory_allocated(device=client_device) / 1024**3:.4f} GB,max memory: {torch.cuda.max_memory_allocated(device=client_device) / 1024**3:.4f} GB"
@@ -61,12 +64,12 @@ class Client(object):
             buffer_size=4096,
             similuate_delay=self.simulate_delay,
         ) as client:
-            self.train_logger.info(f"[Client {self.client_id}] start train epoch")
+            self.train_logger.info(f"[Client {self.client_id}] start train epoch,data loader len: {len(self.train_loader)}")
             start_time = time.time()
             for batch_idx, batch in enumerate(self.train_loader, 1):
-                loss = self.train_batch(batch, client)
-                self.train_logger.info(f"[Client {self.client_id}] train batch {batch_idx}, loss: {loss:.4f}")
-                if batch_idx % batch_per_sync == 0 or batch_idx == len(self.train_loader):
+                loss = self.train_batch(batch, client, batch_idx)
+                self.train_logger.info(f"[Client {self.client_id}] train batch {batch_idx}/{self.batch_num}, loss: {loss:.4f}")
+                if batch_idx % batch_per_sync == 0 or batch_idx == self.batch_num:
                     self.train_logger.info(f"[Client {self.client_id} {batch_idx//batch_per_sync}-th Aggregation] send aggregate_client signal")
                     head_params = [p.cpu() for p in self.head_model.parameters() if p.requires_grad]
                     tail_params = [p.cpu() for p in self.tail_model.parameters() if p.requires_grad]
@@ -98,11 +101,13 @@ class Client(object):
                     torch.cuda.empty_cache()
                     torch.cuda.reset_peak_memory_stats(device=self.client_device)
                     # self.train_logger.info(f"[Client {self.client_id}] updated model")
-                    if batch_idx == batch_per_sync * 2:
+                    if batch_idx == batch_per_sync * 5:
                         break  # for test only
+                if batch_idx == self.batch_num:
+                    break
             end_time = time.time()
             self.train_logger.info(
-                f"[Client {self.client_id} Finished] train epoch time: {end_time - start_time:.4f} s, compute time: {self.compute_time:.4f} s"
+                f"[Client {self.client_id} Finished] train epoch time: {end_time - start_time:.2f} s, compute time: {self.compute_time:.2f} s"
             )
         pass
 
@@ -115,10 +120,11 @@ class Client(object):
         torch.cuda.synchronize(device=self.client_device)
         pass
 
-    def train_batch(self, batch: Dict, client: SocketCommunicator):
+    def train_batch(self, batch: Dict, client: SocketCommunicator, batch_idx: int):
         input_ids = batch["input_ids"].to(self.client_device)
         attention_mask = batch["attention_mask"].to(self.client_device)
-        labels = batch["labels"].to(self.client_device) if "labels" in batch else input_ids
+        input_ids, attention_mask = pad_inputs(input_ids, attention_mask, self.client_args["max_seq_len"])
+        labels = input_ids
         s = time.time()
         head_outs = self.head_model.forward(input_ids, attention_mask)
         torch.cuda.synchronize(device=self.client_device)

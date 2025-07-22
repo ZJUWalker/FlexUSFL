@@ -131,7 +131,7 @@ class SocketCommunicator(object):
                     data_size_bytes=data_size,
                     bandwidth_mbps=230,  # 可调整带宽（Mbps）
                     propagation_delay_ms=50,  # 可调整传播延迟（ms）
-                    jitter_ms=10,  # 可调整抖动范围（ms）
+                    jitter_ms=0,  # 可调整抖动范围（ms）
                 )
 
                 serialization_time = time.time() - start_time

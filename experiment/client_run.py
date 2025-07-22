@@ -18,6 +18,8 @@ def client_worker(rank: int, args: dict):
     set_seed(SEED)
     dataset_name = args["dataset"]
     num_clients = args["num_clients"]
+    batch_size = args["batch_size"]
+    max_seq_len = args["max_seq_len"]
     model_name = args["model"]
     model_dir = os.path.join("/share/models", model_name)
     split_point = args["split_point"]
@@ -28,8 +30,11 @@ def client_worker(rank: int, args: dict):
     # ---------------load model and tokenizer --------------------------
     head, tail, tokenizer = load_client(model_dir, args, split_point)
     # -----------------load dataset------------------------------------
-    client_dataloaders = load_dataset(dataset_name, tokenizer, list(range(num_clients)))
+    client_dataloaders = load_dataset(dataset_name, tokenizer, list(range(num_clients)), batch_size, max_seq_len)
     data = client_dataloaders[rank]
+    min_batch_num = min([len(cd["train"]) for cd in client_dataloaders.values()])
+    if rank == 0:
+        print(f"min_batch_num: {min_batch_num}")
     # -----------------create client----------
     # print(f'cuda memory allocated: {torch.cuda.memory_allocated(device)/1024**3:.2f} GB')
     client = Client(
@@ -42,6 +47,7 @@ def client_worker(rank: int, args: dict):
         train_logger=logger,
         dataset_train=data["train"],
         dataset_test=data["test"],
+        batch_num=min_batch_num,
     )
     client.train_epoch()
 
@@ -55,7 +61,7 @@ def main():
     parser.add_argument("-Q8", "--use_qlora_8bit", action="store_true", help="use qlora 8bit")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-B", "--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("-SQ", "--max_sql", type=int, default=512, help="max sequence length")
+    parser.add_argument("-SL", "--max_seq_len", type=int, default=256, help="max sequence length")
     parser.add_argument("-NC", "--num_clients", type=int, default=2)
     parser.add_argument("-S", "--step", type=int, default=20)
     parser.add_argument("-V", "--version", type=str, default="v1")

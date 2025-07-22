@@ -42,9 +42,11 @@ class ServerBase:
         self.client_lock = threading.Lock()  # 用于同步客户端连接信息
         self.compute_task_thread: threading.Thread = None  # 用于计算任务的线程
         self.clients_comm_threads: List[threading.Thread] = []  # 用于处理客户端通信的线程
+        # ----------------------------------profile----------------------------------------
         self.compute_time = 0  # 用于记录计算时间
         self.aggregate_server_time = 0  # 用于记录聚合时间
         self.aggregate_client_time = 0  # 用于记录聚合时间
+        self.idle_time = 0  # 用于记录空闲时间
         pass
 
     @abstractmethod

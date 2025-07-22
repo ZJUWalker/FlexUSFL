@@ -37,12 +37,12 @@ if __name__ == "__main__":
         log_dir=log_dir,
         console_output=False,
     )
-    matrix_logger.info(f"step | mem alloc(GB) | mem reserved(GB)")
+    matrix_logger.info(f"step | mem alloc(GB) | mem reserved(GB) | avg_loss ")
     # =====================================================================
     model_dir = os.path.join("/share/models", server_args["model"])
     split_point = server_args["split_point"]
     server_model = load_server_model(model_dir, server_args, split_point)
-    lr = server_args['learning_rate']
+    lr = server_args["learning_rate"]
     version = server_args["version"]
     if version == "v1":
         server = ServerV1(

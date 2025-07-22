@@ -54,7 +54,7 @@ class ServerV2(ServerBase):
             self.server_output = server_output
             self.hidden_status_from_head = hidden_status_from_head
             activation_to_tail = server_output.cpu()
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             # self.logger.info(f"Client {client_id}: Releasing lock for forward")
             return activation_to_tail
         except Exception as e:
@@ -76,7 +76,7 @@ class ServerV2(ServerBase):
             end_bwd = time.time()
             self.compute_time += end_bwd - start_bwd  # 用于记录计算时间
             grad_to_head = self.hidden_status_from_head.grad.cpu()
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             # self.logger.info(f"Client {client_id}: Releasing lock for backward")
             return grad_to_head
         except Exception as e:
@@ -116,21 +116,22 @@ class ServerV2(ServerBase):
                 elif "aggregate" in data:
                     with self.client_lock:
                         self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
-                        self.client_head_model_params[client_id] = data['head_params']
-                        self.client_tail_model_params[client_id] = data['tail_params']
-                        self.client_model_losses[client_id] = data['loss']
+                        self.client_head_model_params[client_id] = data["head_params"]
+                        self.client_tail_model_params[client_id] = data["tail_params"]
+                        self.client_model_losses[client_id] = data["loss"]
                         self.aggregate_count += 1
-                        self.logger.info(f"Aggregating client models, count: {self.aggregate_count}/{self.num_clients}")
+                        if data['client_id'] == 0:
+                            self.logger.info(f"Waiting for aggregation, step {data['step']}")
                         if self.aggregate_count == self.num_clients:
                             # aggregate the client models
                             head_params_avg, tail_params_avg, loss = self._aggregate_client_models()
                             self.aggregate_count = 0
                             self.logger.info(f"Aggregated client models finished, avg loss: {loss}")
                             self.logger.info(
-                                f'Aggrageting server model finished, '
-                                f'total compute time: {self.compute_time:.2f}s, '
-                                f'total server aggregate time: {self.aggregate_server_time:.2f}s, '
-                                f'total clients aggregate time: {self.aggregate_client_time:.2f}s'
+                                f"Aggrageting server model finished, "
+                                f"total compute time: {self.compute_time:.2f}s, "
+                                f"total server aggregate time: {self.aggregate_server_time:.2f}s, "
+                                f"total clients aggregate time: {self.aggregate_client_time:.2f}s"
                             )
                             # Send acknowledgment to all clients
                             for cid in range(self.num_clients):
@@ -146,7 +147,8 @@ class ServerV2(ServerBase):
                             self.matrix_logger.info(
                                 f"{data['step']:^5}|"
                                 f"{torch.cuda.max_memory_allocated(self.server_device)/1024**3:^15.3f}|"
-                                f"{torch.cuda.max_memory_reserved(self.server_device)/1024**3:^18.3f}"
+                                f"{torch.cuda.max_memory_reserved(self.server_device)/1024**3:^18.3f}|"
+                                f"{loss:^10.4f}"
                             )
                             torch.cuda.empty_cache()
                             torch.cuda.reset_peak_memory_stats(self.server_device)
@@ -158,14 +160,25 @@ class ServerV2(ServerBase):
                 self.clients[:] = [(c, a, cid) for c, a, cid in self.clients if c != conn]
             conn.close()
             self.logger.info(f"Client {addr} (client_id={client_id}) closed")
+            if self.clients == []:
+                self.logger.info(
+                    f"All clients disconnected, server shutting down ,"
+                    f"total compute time: {self.compute_time:.2f} s, "
+                    f"total server aggregate time: {self.aggregate_server_time:.2f} s, "
+                    f"total clients aggregate time: {self.aggregate_client_time:.2f} s, "
+                    f"total idle time: {self.idle_time:.2f} s"
+                )
 
     def compute_task(self):
         uncompleted_clients = list(range(self.num_clients))
         while True:
             try:
-                data = self.activation_queue.get(timeout=30.0)
+                start_get_time = time.time()
+                data = self.activation_queue.get(timeout=180.0)
+                end_get_time = time.time()
+                self.idle_time += end_get_time - start_get_time  # 用于记录空闲时间
                 if data["client_id"] not in uncompleted_clients:
-                    self.activation_queue.put(data, timeout=30.0)
+                    self.activation_queue.put(data, timeout=180.0)
                     time.sleep(0.001)
                     continue
                 # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
@@ -183,7 +196,10 @@ class ServerV2(ServerBase):
 
                 while True:
                     try:
-                        data = self.gradient_queue.get_nowait()
+                        start_get_time = time.time()
+                        data = self.gradient_queue.get(180.0)
+                        end_get_time = time.time()
+                        self.idle_time += end_get_time - start_get_time  # 用于记录空闲时间
                         # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                         d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                         self.server_activation_queues[data["client_id"]].put(

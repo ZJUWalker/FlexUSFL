@@ -75,14 +75,14 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
     return head, tail, tokenizer
 
 
-def load_dataset(dataset_name: str = 'gsm8k', tokenizer: AutoTokenizer = None, client_ids: List[int] = [0]):
+def load_dataset(dataset_name: str = "gsm8k", tokenizer: AutoTokenizer = None, client_ids: List[int] = [0], batch_size: int = 4, max_seq_len: int = 256):
     # usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
         client_ids=client_ids,
-        batch_size=4,
-        max_seq_len=512,
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
         splits=["train", "test"],
         shuffle=False,
     )
@@ -109,15 +109,6 @@ def load_server_model(
     model.train()
     if server_args["use_qlora_4bit"] or server_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)
-        if server_args["use_lora"]:
-            lora_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
-                r=8,
-                lora_alpha=32,
-                lora_dropout=0.1,
-                target_modules=["q_proj", "k_proj", "v_proj"],
-            )
-            model = get_peft_model(model, lora_config)
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     tokenizer.pad_token = tokenizer.eos_token
@@ -135,5 +126,13 @@ def load_server_model(
         server = load_qwen3_server(model, split_config)
     else:
         raise ValueError(f"unsupported model card {server_args['model']}")
-
+    if server_args["use_lora"]:
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=8,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            target_modules=["q_proj", "k_proj", "v_proj"],
+        )
+        model = get_peft_model(model, lora_config)
     return server

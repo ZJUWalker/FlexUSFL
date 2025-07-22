@@ -76,11 +76,12 @@ class ServerV1(ServerBase):
                     with self.client_lock:
                         try:
                             self.aggregate_count += 1
-                            self.client_head_model_params[client_id] = data['head_params']
-                            self.client_tail_model_params[client_id] = data['tail_params']
-                            self.client_model_losses[client_id] = data['loss']
+                            self.client_head_model_params[client_id] = data["head_params"]
+                            self.client_tail_model_params[client_id] = data["tail_params"]
+                            self.client_model_losses[client_id] = data["loss"]
                             self.aggregate_ready_clients.append(client_id)
-                            self.logger.info(f"Aggregate count: {self.aggregate_count}/{self.num_clients}, step {data['step']}")
+                            if data['client_id'] == 0:
+                                self.logger.info(f"Waiting for aggregation, step {data['step']}")
                             if self.aggregate_count == self.num_clients:
                                 # aggregate server models
                                 self._aggregate_trunk_models()
@@ -92,12 +93,14 @@ class ServerV1(ServerBase):
                                     f"{data['step']:^5}|"
                                     f"{torch.cuda.max_memory_allocated(self.server_device)/1024**3:^15.3f}|"
                                     f"{torch.cuda.max_memory_reserved(self.server_device)/1024**3:^18.3f}"
+                                    f"{avg_loss:^10.4f}"
                                 )
                                 self.logger.info(
-                                    f'Aggrageting server model finished, '
-                                    f'total compute time: {self.compute_time:.2f}s, '
-                                    f'total server aggregate time: {self.aggregate_server_time:.2f}s, '
-                                    f'total clients aggregate time: {self.aggregate_client_time:.2f}s'
+                                    f"Aggrageting server model finished, "
+                                    f"total compute time: {self.compute_time:.2f}s, "
+                                    f"total server aggregate time: {self.aggregate_server_time:.2f}s, "
+                                    f"total clients aggregate time: {self.aggregate_client_time:.2f}s, "
+                                    f"total idle time: {self.idle_time:.2f}s"
                                 )
                                 torch.cuda.reset_peak_memory_stats(self.server_device)
                                 # Send acknowledgment to all clients
@@ -121,11 +124,22 @@ class ServerV1(ServerBase):
                 self.clients[:] = [(c, a, cid) for c, a, cid in self.clients if c != client_conn]
             client_conn.close()
             self.logger.info(f"Client {addr} (client_id={client_id}) closed")
+            if self.clients == []:
+                self.logger.info(
+                    f"All clients disconnected, server shutting down ,"
+                    f"total compute time: {self.compute_time:.2f} s, "
+                    f"total server aggregate time: {self.aggregate_server_time:.2f} s, "
+                    f"total clients aggregate time: {self.aggregate_client_time:.2f} s, "
+                    f"total idle time: {self.idle_time:.2f} s"
+                )
 
     def compute_task(self) -> None:
         while True:
             try:
-                data = self.activation_queue.get_nowait()
+                start_get = time.time()
+                data = self.activation_queue.get(timeout=180.0)
+                end_get = time.time()
+                self.idle_time += end_get - start_get  # 用于记录空闲时间
                 # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
                 server_activation = self._forward(
                     data["client_id"],
@@ -138,7 +152,10 @@ class ServerV1(ServerBase):
             except queue.Empty:
                 pass
             try:
-                data = self.gradient_queue.get_nowait()
+                start_get = time.time()
+                data = self.gradient_queue.get(timeout=180.0)
+                end_get = time.time()
+                self.idle_time += end_get - start_get  # 用于记录空闲时间
                 # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                 self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_gradient": d_activation_to_client})
@@ -197,6 +214,8 @@ class ServerV1(ServerBase):
         self.aggregate_ready_clients = []
 
     def _aggregate_trunk_models(self) -> dict:
+        if len(self.trunk_models.keys()) == 1:
+            return {"status": "aggregation_completed"}
         try:
             start_agg_time = time.time()
             w_trunk_model_params = []

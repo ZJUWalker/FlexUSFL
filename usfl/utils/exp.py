@@ -17,7 +17,6 @@ def set_seed(seed: int, cuda: bool = True, deterministic: bool = True) -> None:
         if deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-            print(torch.cuda.get_device_name(0))
 
 
 def fed_average(w: List[Dict]) -> Dict:
