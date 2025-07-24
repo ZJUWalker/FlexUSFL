@@ -95,11 +95,11 @@ class ServerV3(ServerV2):
 
         while True:
             process_activation = True
+            fwd_wait_time = time.time()
             try:
-                start_time = time.time()
-                data = self.activation_queue.get(180.0)
-                end_time = time.time()
-                self.idle_time += end_time - start_time
+                data = self.activation_queue.get_nowait()
+                fwd_start_time = time.time()
+                self.idle_time += fwd_start_time - fwd_wait_time
                 if data["client_id"] not in unforwarded_clients:
                     self.activation_queue.put(data)
                     time.sleep(0.001)
@@ -116,16 +116,14 @@ class ServerV3(ServerV2):
                     # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
                     unforwarded_clients.remove(data["client_id"])
                     unbackwarded_clients.append(data["client_id"])
-
+                # fwd_start_time = time.time()
             except queue.Empty:
                 pass
-
+            bwd_wait_time = time.time()
             try:
-                start_time = time.time()
-                data = self.gradient_queue.get(180.0)
-                end_time = time.time()
-                self.idle_time += end_time - start_time
-                # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
+                data = self.gradient_queue.get_nowait()
+                bwd_start_time = time.time()
+                self.idle_time += bwd_start_time - bwd_wait_time
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                 self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_gradient": d_activation_to_client})
                 # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")

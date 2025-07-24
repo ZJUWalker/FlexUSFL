@@ -1,5 +1,6 @@
 import os
 import math
+import json
 
 global log_dir
 
@@ -16,14 +17,23 @@ def get_all_log_files(dir: str):
 
 
 def _get_epoch_time(fp: str):
+    time_dict = {}
     with open(fp, 'r') as f:
         lines = f.readlines()
-        last_line = lines[-1].strip()
-        if 'Finished' in last_line:
-            start = last_line.index('train epoch time: ')
-            end = start + len('train epoch time: ') + 7
-            return last_line[start + len("train epoch time: ") : end]
-        return None
+        for line in lines:
+            if 'start with args' in line:
+                start = line.index('start with args: ') + len('start with args: ')
+                dict_data = line[start:].strip()
+                dataset = eval(dict_data)['dataset']
+                if dataset not in time_dict:
+                    time_dict[dataset] = None
+            if 'Finished' in line:
+                start = line.index('train epoch time: ')
+                end = start + len('train epoch time: ') + 6
+                time_dict[dataset] = line[start + len("train epoch time: ") : end]
+                # if dataset == 'gsm8k' and 'client_number_32' in fp:
+                # print(f'fp: {fp}, time: {time_dict[dataset]}')
+    return time_dict
 
 
 def _get_mem_alloc(fp: str):
@@ -47,7 +57,7 @@ def _get_server_loss_convergence(fp: str):
         for line in lines:
             if 'Aggregated client models finished' in line:
                 start = line.index('Aggregated client models finished')
-                end = start + len('Aggregated client models finished, avg loss: ') + 6
+                end = start + len('Aggregated client models finished, avg loss: ') + 4
                 l = line[start + len("Aggregated client models finished, avg loss: ") : end]
                 losses.append(float(l))
     return losses
@@ -60,7 +70,7 @@ def _get_client_loss_convergence(fp: str):
         for line in lines:
             if 'train batch' in line:
                 start = line.index('loss: ')
-                end = start + len('loss: ') + 6
+                end = start + len('loss: ') + 5
                 l = line[start + len("loss: ") : end]
                 losses.append(float(l))
     return losses
@@ -69,8 +79,8 @@ def _get_client_loss_convergence(fp: str):
 def get_avg_epoch_time(model, version):
     files = get_all_log_files(log_dir)
     epoch_time_dict = {}
-    for client_num in [1, 2, 4, 6, 8, 16, 24]:
-        avg_time = 0
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
+        avg_time = {}
         target_files = list(
             filter(lambda x: model in x and version in x and 'server' not in x and x.split('/')[4] == f'client_number_{client_num}', files)
         )
@@ -78,11 +88,16 @@ def get_avg_epoch_time(model, version):
         #     print(f)
         for file in target_files:
             epoch_time = _get_epoch_time(file)
-            if epoch_time is not None:
-                avg_time += float(epoch_time)
+            if epoch_time != {}:
+                for k, v in epoch_time.items():
+                    if k not in avg_time:
+                        avg_time[k] = 0
+                    avg_time[k] += float(v) if v is not None else 0
+                # avg_time += float(epoch_time)
         if len(target_files) > 0:
-            avg_time /= client_num
-            epoch_time_dict[client_num] = f'{avg_time:.2f}'
+            for k, v in avg_time.items():
+                avg_time[k] /= client_num
+            epoch_time_dict[client_num] = avg_time
         else:
             epoch_time_dict[client_num] = None
     return epoch_time_dict
@@ -91,7 +106,7 @@ def get_avg_epoch_time(model, version):
 def get_max_mem_alloc(model, version):
     files = get_all_log_files(log_dir)
     max_mem_dict = {}
-    for client_num in [1, 2, 4, 6, 8, 16, 24]:
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
         max_mem = 0
         target_file = list(
             filter(lambda x: model in x and version in x and 'training_metrics' in x and x.split('/')[4] == f'client_number_{client_num}', files)
@@ -119,7 +134,7 @@ def get_client_loss_convergence(model, version):
 
     files = get_all_log_files(log_dir)
     client_loss_dict = {}
-    for client_num in [1, 2, 4, 6, 8, 16, 24]:
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
         avg_losses = []
         target_files = list(
             filter(lambda x: model in x and version in x and 'server' not in x and x.split('/')[4] == f'client_number_{client_num}', files)
@@ -156,7 +171,7 @@ if __name__ == '__main__':
     argparser.add_argument('--max_mem', '-MM', action='store_true')
     argparser.add_argument('--loss', '-L', action='store_true')
     args = argparser.parse_args()
-    log_dir = './log'
+    log_dir = './log/qwen'
     print(f'analysis for model: {args.model}, version: {args.version}')
     if args.epoch_time:
         print('epoch time analysis:')

@@ -19,6 +19,7 @@ def set_seed(seed: int, cuda: bool = True, deterministic: bool = True) -> None:
             torch.backends.cudnn.benchmark = False
 
 
+@torch.no_grad()
 def fed_average(w: List[Dict]) -> Dict:
     """
     FedAvg: Federated Averaging
@@ -31,6 +32,7 @@ def fed_average(w: List[Dict]) -> Dict:
     return w_avg
 
 
+@torch.no_grad()
 def fed_avg_params(params: List[List[torch.nn.Parameter]]) -> List[torch.nn.Parameter]:
     """
     FedAvgParams: Federated Averaging of model parameters

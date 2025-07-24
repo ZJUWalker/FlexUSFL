@@ -9,7 +9,7 @@ import torch.nn as nn
 import copy
 
 from usfl.server.server_base import ServerBase
-from usfl.utils.exp import fed_avg_params
+from usfl.utils.exp import fed_avg_params, fed_average
 
 
 class ServerV1(ServerBase):
@@ -135,11 +135,11 @@ class ServerV1(ServerBase):
 
     def compute_task(self) -> None:
         while True:
+            fwd_wait_time = time.time()
             try:
-                start_get = time.time()
-                data = self.activation_queue.get(timeout=180.0)
-                end_get = time.time()
-                self.idle_time += end_get - start_get  # 用于记录空闲时间
+                data = self.activation_queue.get_nowait()
+                fwd_start_time = time.time()
+                self.idle_time += fwd_start_time - fwd_wait_time
                 # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
                 server_activation = self._forward(
                     data["client_id"],
@@ -151,11 +151,11 @@ class ServerV1(ServerBase):
                 # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
             except queue.Empty:
                 pass
+            bwd_wait_time = time.time()
             try:
-                start_get = time.time()
-                data = self.gradient_queue.get(timeout=180.0)
-                end_get = time.time()
-                self.idle_time += end_get - start_get  # 用于记录空闲时间
+                data = self.gradient_queue.get_nowait()
+                bwd_start_time = time.time()
+                self.idle_time += bwd_start_time - bwd_wait_time
                 # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                 self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_gradient": d_activation_to_client})
@@ -220,7 +220,7 @@ class ServerV1(ServerBase):
             start_agg_time = time.time()
             w_trunk_model_params = []
             for client_id in range(self.num_clients):
-                w_trunk_model_params.append([p.cpu() for p in self.trunk_models[client_id].parameters() if p.requires_grad])
+                w_trunk_model_params.append([p for p in self.trunk_models[client_id].parameters() if p.requires_grad])
             avg_trunk_model_params = fed_avg_params(w_trunk_model_params)
             for client_id in range(self.num_clients):
                 i = 0
