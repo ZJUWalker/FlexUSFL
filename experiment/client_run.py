@@ -24,7 +24,7 @@ def client_worker(rank: int, args: dict):
     model_dir = os.path.join("/share/models", model_name)
     split_point = args["split_point"]
     device = f"cuda:{rank % 3}"  # use 3 gpus
-    log_dir = f"log/{args['model']}/client_number_{args['num_clients']}/{args['version']}/client"
+    log_dir = f"log/loss/{args['model']}/client_number_{args['num_clients']}/{args['version']}/client"
     logger = create_logger(log_file_name=f"client_{rank}.log", console_output=False, log_dir=log_dir)
     logger.info(f"client {rank} start with args: {args}")
     # ---------------load model and tokenizer --------------------------
@@ -46,7 +46,7 @@ def client_worker(rank: int, args: dict):
         client_device=device,
         train_logger=logger,
         dataset_train=data["train"],
-        dataset_test=data["test"],
+        dataset_test=data["test"] if "test" in data else None,
         batch_num=min_batch_num,
     )
     client.train_epoch()

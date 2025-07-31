@@ -104,18 +104,17 @@ class ServerV2(ServerBase):
                 if "activation" in data:
                     # self.logger.info(f"Received activation from client_id={client_id} (addr={addr}): shape={data['activation'].shape}")
                     self.activation_queue.put(data)
-                    response = self.server_activation_queues[client_id].get(timeout=180.0)
+                    response = self.server_activation_queues[client_id].get(timeout=60.0)
                     if response["client_id"] == client_id:
                         self._send_to_client(client_id, response)
                 elif "gradient" in data:
                     # self.logger.info(f"Received gradient from client_id={client_id} (addr={addr}): shape={data['gradient'].shape}")
                     self.gradient_queue.put(data)
-                    response = self.server_activation_queues[client_id].get(timeout=180.0)
+                    response = self.server_activation_queues[client_id].get(timeout=60.0)
                     if response["client_id"] == client_id and "server_gradient" in response:
                         self._send_to_client(client_id, response)
                 elif "aggregate" in data:
                     with self.client_lock:
-                        self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
                         self.client_head_model_params[client_id] = data["head_params"]
                         self.client_tail_model_params[client_id] = data["tail_params"]
                         self.client_model_losses[client_id] = data["loss"]
@@ -172,13 +171,13 @@ class ServerV2(ServerBase):
     def compute_task(self):
         uncompleted_clients = list(range(self.num_clients))
         while True:
+            fwd_wait_time = time.time()
             try:
-                start_get_time = time.time()
-                data = self.activation_queue.get(timeout=180.0)
-                end_get_time = time.time()
-                self.idle_time += end_get_time - start_get_time  # 用于记录空闲时间
+                data = self.activation_queue.get_nowait()
+                fwd_start_time = time.time()
+                self.idle_time += fwd_start_time - fwd_wait_time
                 if data["client_id"] not in uncompleted_clients:
-                    self.activation_queue.put(data, timeout=180.0)
+                    self.activation_queue.put(data, timeout=60.0)
                     time.sleep(0.001)
                     continue
                 # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
@@ -193,13 +192,12 @@ class ServerV2(ServerBase):
 
                 if data["is_training"] == False:
                     continue
-
+                bwd_wait_time = time.time()
                 while True:
                     try:
-                        start_get_time = time.time()
-                        data = self.gradient_queue.get(180.0)
-                        end_get_time = time.time()
-                        self.idle_time += end_get_time - start_get_time  # 用于记录空闲时间
+                        data = self.gradient_queue.get_nowait()
+                        bwd_start_time = time.time()
+                        self.idle_time += bwd_start_time - bwd_wait_time
                         # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                         d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                         self.server_activation_queues[data["client_id"]].put(

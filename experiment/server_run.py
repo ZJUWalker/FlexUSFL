@@ -23,14 +23,17 @@ if __name__ == "__main__":
     parser.add_argument("-BF", "--buffer_size", type=int, default=4096, help="Buffer size for socket communication")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:3", help="Device for server model")
     parser.add_argument("-CKPT", "--use_checkpoint", action="store_true", help="Use checkpoint")
+    parser.add_argument("-AVG", "--use_avg", action="store_true", help="Use checkpoint")
+    parser.add_argument("-SCKPT", "--checkpoint_num", type=int, default=-1, help="Number of checkpoints to use")
     parser.add_argument("-SP", "--split_point", type=int, default=2)
+    parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("-V", "--version", type=str, default="v1", help="usfl version")  # add a flag to specify the version of usfl
     args = parser.parse_args()
     server_args = vars(args)
     set_seed(SEED)
     # =====================================================================
-    log_dir = f"log/{server_args['model']}/" f"client_number_{server_args['num_clients']}/{server_args['version']}/server"
+    log_dir = f"log/loss/{server_args['model']}/" f"client_number_{server_args['num_clients']}/{server_args['version']}/server"
     logger = create_logger(log_file_name="training_steps.log", log_dir=log_dir, console_output=False)
     matrix_logger = create_logger(
         log_file_name="training_metrics.log",
@@ -70,19 +73,21 @@ if __name__ == "__main__":
             server_model=server_model,
             server_device=server_args["server_device"],
             num_clients=server_args["num_clients"],
+            checkpoint_client_num = server_args["num_clients"] if server_args["use_checkpoint"] else server_args["checkpoint_num"] ,
             lr=lr,
             logger=logger,
             matrix_logger=matrix_logger,
         )
     # =====================================================================
     logger.info(
-        "{} server start split point: {}, buffer size: {}B ,use lora {} ,use qlora {} ,use checkpoint {}".format(
+        "{} server start split point: {}, buffer size: {}B ,use lora {} ,use qlora {} ,use checkpoint {},checkpoint num {}".format(
             server_args["model"],
             split_point,
             server_args["buffer_size"],
             server_args["use_lora"],
             ("qlora_4bit" if server_args["use_qlora_4bit"] else "qlora_8bit" if server_args["use_qlora_8bit"] else "no_quantization"),
-            server_args["use_sl_ckpt"],
+            server_args["use_checkpoint"],
+            server_args["checkpoint_num"],
         )
     )
     # =====================================================================

@@ -373,7 +373,7 @@ class DialogSumFedDataset(FedDataset):
 
     def _col_fun(self, batch, max_seq_len=-1, **kwargs):
         texts = [b["input"] for b in batch]
-        max_len = 256 if max_seq_len < 0 else max_seq_len
+        max_len = 512 if max_seq_len < 0 else max_seq_len
 
         # 对整个输入 (dialogue + summary) 分词
         input = self.tokenizer(texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt")
@@ -657,7 +657,7 @@ class E2EDataset(FedDataset):
 
     def _col_fun(self, batch, max_seq_len=-1, extra_info=True):
         texts = [b["input"] for b in batch]
-        max_len = 256 if max_seq_len < 0 else max_seq_len
+        max_len = 128 if max_seq_len < 0 else max_seq_len
 
         input = self.tokenizer(texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt")
 

@@ -1,24 +1,31 @@
 #!/bin/bash
 
 port=8000
-# for version in {"v3",}
-# do
-#     for i in {4,6,8}
-#     do
-#         for model in {"qwen/qwen3-1.7b",}
-#         do
-#             echo "Running Clients with {model $model ,USFL version=$version, client num $i, LoRA=True,split_point=2}"
-#             python experiment/client_run.py -NC=${i} -V=${version} -L -SP=2 -M=${model} -P=${port}
-#             port=$((port + 1))
-#         done
-#     done
-# done
-model=qwen/qwen3-1.7b
-version=v3
-i=48
-for bs in {1,}
+max_seq_len=256
+for j in {1,}
 do
-    echo "Running Clients with {model $model ,USFL version=$version, client num $i, LoRA=True,QLoRA=False,split_point=2, batch_size=$bs}"
-    python experiment/client_run.py -NC=${i} -V=${version} -L -SP=2 -M=${model} -P=${port} -B=${bs}
-    port=$((port + 1))
+    for dataset in {"gsm8k",}
+    do
+        # if [ $dataset = "dialogsum" ]
+        # then
+        #     max_seq_len=512
+        # else
+        #     max_seq_len=128
+        # fi
+        for version in {"v1","v2"}
+        do
+            for model in {"qwen/qwen3-0.6b","meta-llama/llama3.2-1b"} #"meta-llama/llama3.2-1b"
+            do
+                # if [ $i -ge 8 ] && [ $version -eq "v1" ]; then
+                #     continue
+                # fi
+                for i in {3,}
+                do
+                    echo "$j-th Running Clients with {model $model ,dataset $dataset, USFL version=$version, client num $i, max_seq_len=$max_seq_len, LoRA=True, split_point=2}"
+                    python experiment/client_run.py -NC=${i} -V=${version} -L -SP=2 -M=${model} -P=${port} -B=1 -DS=${dataset} -SL=${max_seq_len}
+                    port=$((port + 1))
+                done
+            done
+        done
+    done
 done

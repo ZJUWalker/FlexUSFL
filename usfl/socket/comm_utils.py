@@ -124,20 +124,20 @@ class SocketCommunicator(object):
             # 序列化对象并计算大小
             start_time = time.time()
             data = pickle.dumps(obj)
-            data_size = len(data)
-            if self.simuluate_delay:
-                # 计算网络延迟（包括序列化和传输时间）
-                delay = calculate_network_delay(
-                    data_size_bytes=data_size,
-                    bandwidth_mbps=230,  # 可调整带宽（Mbps）
-                    propagation_delay_ms=50,  # 可调整传播延迟（ms）
-                    jitter_ms=0,  # 可调整抖动范围（ms）
-                )
+            # data_size = len(data)
+            # if self.simuluate_delay:
+            #     # 计算网络延迟（包括序列化和传输时间）
+            #     delay = calculate_network_delay(
+            #         data_size_bytes=data_size,
+            #         bandwidth_mbps=230,  # 可调整带宽（Mbps）
+            #         propagation_delay_ms=50,  # 可调整传播延迟（ms）
+            #         jitter_ms=0,  # 可调整抖动范围（ms）
+            #     )
 
-                serialization_time = time.time() - start_time
-                total_delay = max(0, delay + serialization_time)  # 包含序列化时间
+            #     serialization_time = time.time() - start_time
+            #     total_delay = max(0, delay + serialization_time)  # 包含序列化时间
 
-                time.sleep(total_delay)
+            #     time.sleep(total_delay)
 
             # 发送数据
             length = len(data)

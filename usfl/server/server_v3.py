@@ -18,6 +18,7 @@ class ServerV3(ServerV2):
         server_device: torch.device,
         lr: float,
         num_clients: int,
+        checkpoint_client_num:int = -1,
         optimizer_clz: torch.optim.Optimizer.__class__ = torch.optim.AdamW,
         logger: logging.Logger = None,
         matrix_logger: logging.Logger = None,
@@ -33,6 +34,8 @@ class ServerV3(ServerV2):
             logger=logger,
             matrix_logger=matrix_logger,
         )
+        self.checkpoint_client_num = 0 if checkpoint_client_num <= 0 else checkpoint_client_num
+        # self.checkpoint_clients=[]
         self.server_output_dict: Dict[int, torch.Tensor] = {}  # Dict[int, torch.Tensor]
         self.hidden_status_from_head_dict: Dict[int, torch.Tensor] = {}
         for client_id in range(self.num_clients):
@@ -48,16 +51,16 @@ class ServerV3(ServerV2):
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
             fwd_start_time = time.time()
-            # if self.server_args["use_checkpoint"]:
-            server_output = torch.utils.checkpoint.checkpoint(
-                self.trunk_model.__call__,
-                hidden_status_from_head,
-                attention_mask,
-                pos_emb,
-                use_reentrant=False,
-            )
-            # else:
-            # server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
+            if client_id < self.checkpoint_client_num:
+                server_output = torch.utils.checkpoint.checkpoint(
+                    self.trunk_model.__call__,
+                    hidden_status_from_head,
+                    attention_mask,
+                    pos_emb,
+                    use_reentrant=False,
+                )
+            else:
+                server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
             torch.cuda.synchronize(self.server_device)
             fwd_end_time = time.time()
             self.compute_time += fwd_end_time - fwd_start_time
@@ -95,11 +98,11 @@ class ServerV3(ServerV2):
 
         while True:
             process_activation = True
+            fwd_wait_time = time.time()
             try:
-                start_time = time.time()
-                data = self.activation_queue.get(180.0)
-                end_time = time.time()
-                self.idle_time += end_time - start_time
+                data = self.activation_queue.get_nowait()
+                fwd_start_time = time.time()
+                self.idle_time += fwd_start_time - fwd_wait_time
                 if data["client_id"] not in unforwarded_clients:
                     self.activation_queue.put(data)
                     time.sleep(0.001)
@@ -116,16 +119,14 @@ class ServerV3(ServerV2):
                     # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
                     unforwarded_clients.remove(data["client_id"])
                     unbackwarded_clients.append(data["client_id"])
-
+                # fwd_start_time = time.time()
             except queue.Empty:
                 pass
-
+            bwd_wait_time = time.time()
             try:
-                start_time = time.time()
-                data = self.gradient_queue.get(180.0)
-                end_time = time.time()
-                self.idle_time += end_time - start_time
-                # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
+                data = self.gradient_queue.get_nowait()
+                bwd_start_time = time.time()
+                self.idle_time += bwd_start_time - bwd_wait_time
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"])
                 self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_gradient": d_activation_to_client})
                 # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
@@ -138,15 +139,25 @@ class ServerV3(ServerV2):
             except queue.Empty:
                 pass
             time.sleep(0.01)
+            
+    # def handle_client_with_aggregation(self, conn, addr, *args, **kwargs):
+    #     super().handle_client_with_aggregation(conn, addr, *args, **kwargs)
+    #     if self.checkpoint_client_num >0:
+    #         self.checkpoint_client_num-=1
+    #         self.logger.info(f"Checkpoint client num decreased from {self.checkpoint_client_num+1} to {self.checkpoint_client_num}")
 
     @torch.no_grad()
     def _update_server_model(self):
         # with self.client_lock:
         step_start_time = time.time()
-        grads = [p.grad for p in self.trunk_model.parameters() if p.grad is not None]
-        for g in grads:
-            g.data.div_(self.num_clients)
-        torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+        if self.server_args["use_avg"]:
+            max_norm = 0.5*self.num_clients
+            grads = [p.grad for p in self.trunk_model.parameters() if p.grad is not None]
+            for g in grads:
+                g.data.div_(self.num_clients)
+        else:
+            max_norm = 0.5
+        torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=max_norm)
         self.optimizer.step()
         self.optimizer.zero_grad()
         torch.cuda.synchronize(self.server_device)

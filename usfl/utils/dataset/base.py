@@ -260,9 +260,12 @@ def get_client_dataloaders(
     client_dataloaders = {client_id: {} for client_id in client_ids}
 
     has_validation = False if dataset_name in ["codealpaca", "gsm8k"] else True
+    has_test = False if dataset_name in ["e2e"] else True
 
     for split in splits:
         if not has_validation and split == "validation":
+            continue
+        if not has_test and split == "test":
             continue
         for client_id in client_ids:
             data_loader = usl_dataset.get_dataloader(
