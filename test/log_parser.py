@@ -35,6 +35,7 @@ def _get_epoch_time(fp: str):
                 # if dataset == 'gsm8k' and 'client_number_32' in fp:
                 # print(f'fp: {fp}, time: {time_dict[dataset]}')
     return time_dict
+<<<<<<< HEAD
 
 def _get_epoch_time_ablation(fp: str):
     time_tuple = [None]*2
@@ -50,6 +51,8 @@ def _get_epoch_time_ablation(fp: str):
                 # if dataset == 'gsm8k' and 'client_number_32' in fp:
                 # print(f'fp: {fp}, time: {time_dict[dataset]}')
     return time_tuple
+=======
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
 
 
 def _get_mem_alloc(fp: str):
@@ -89,11 +92,19 @@ def _get_server_loss_convergence(fp: str):
     with open(fp, 'r') as f:
         lines = f.readlines()
         for line in lines:
+<<<<<<< HEAD
             values = line.split('|')
             try:
                 losses.append(float(values[-1].strip()))
             except Exception as e:
                 continue
+=======
+            if 'Aggregated client models finished' in line:
+                start = line.index('Aggregated client models finished')
+                end = start + len('Aggregated client models finished, avg loss: ') + 4
+                l = line[start + len("Aggregated client models finished, avg loss: ") : end]
+                losses.append(float(l))
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
     return losses
 
 def _get_server_time(fp: str):
@@ -153,7 +164,11 @@ def get_avg_epoch_time_ablation(model, version):
 def get_avg_epoch_time(model, version):
     files = get_all_log_files(log_dir)
     epoch_time_dict = {}
+<<<<<<< HEAD
     for client_num in [1, 2, 3,4, 8, 16,24, 32, 48,64]:
+=======
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
         avg_time = {}
         target_files = list(
             filter(lambda x: model in x and version in x and 'server' not in x and x.split('/')[5] == f'client_number_{client_num}', files)
@@ -162,7 +177,10 @@ def get_avg_epoch_time(model, version):
         #     print(f)
         for file in target_files:
             epoch_time = _get_epoch_time(file)
+<<<<<<< HEAD
             # print(f'file: {file}, epoch_time: {epoch_time}')
+=======
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
             if epoch_time != {}:
                 for k, v in epoch_time.items():
                     if k not in avg_time:
@@ -181,7 +199,11 @@ def get_avg_epoch_time(model, version):
 def get_max_mem_alloc(model, version):
     files = get_all_log_files(log_dir)
     max_mem_dict = {}
+<<<<<<< HEAD
     for client_num in [1, 2, 3,4, 8, 16,24, 32, 48,64]:
+=======
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
         max_mem = 0
         target_file = list(
             filter(lambda x: model in x and version in x and 'training_metrics' in x and x.split('/')[5] == f'client_number_{client_num}', files)
@@ -225,7 +247,11 @@ def get_client_loss_convergence(model, version):
 
     files = get_all_log_files(log_dir)
     client_loss_dict = {}
+<<<<<<< HEAD
     for client_num in [1, 2, 3,4, 8, 16,24, 32, 48,64]:
+=======
+    for client_num in [1, 2, 4, 8, 16, 32, 48]:
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
         avg_losses = []
         target_files = list(
             filter(lambda x: model in x and version in x and 'server' not in x and x.split('/')[5] == f'client_number_{client_num}', files)
@@ -298,6 +324,7 @@ if __name__ == '__main__':
     argparser.add_argument('--loss', '-L', action='store_true')
     argparser.add_argument('--aggragate_time', '-AT', action='store_true')
     args = argparser.parse_args()
+<<<<<<< HEAD
     # log_dir = './log/meta-llama' if 'llama' in args.model else './log/qwen'
     log_dir=f'./log/loss/gsm8k'
     if args.dataset == 'ablation':
@@ -349,3 +376,25 @@ if __name__ == '__main__':
                 if v is not None:
                     for l in v:
                         print(f'{l}')
+=======
+    log_dir = './log/qwen'
+    print(f'analysis for model: {args.model}, version: {args.version}')
+    if args.epoch_time:
+        print('epoch time analysis:')
+        epoch_time = get_avg_epoch_time(args.model, args.version)
+        for k, v in epoch_time.items():
+            print(f'client_num: {k}, avg_epoch_time: {v} s')
+    if args.max_mem:
+        print('max mem analysis:')
+        max_mem = get_max_mem_alloc(args.model, args.version)
+        for k, v in max_mem.items():
+            print(f'client_num: {k}, max_mem: {v} GB')
+    if args.loss:
+        print('client loss analysis:')
+        client_loss = get_client_loss_convergence(args.model, args.version)
+        for k, v in client_loss.items():
+            print(f'client_num: {k}, avg_client_loss:')
+            if k is not None:
+                for l in v:
+                    print(f'{l:.4f}')
+>>>>>>> 79d54401732e64f91d1d4bb0a01ba2d886ea1f91
