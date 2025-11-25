@@ -14,7 +14,7 @@ SEED = 0
 warnings.filterwarnings("ignore", message="To copy construct from a tensor", category=UserWarning)
 
 
-def client_worker(rank: int, args: dict):
+def client_worker(rank: int, args: dict, lag_ratios: list, barrier):
     set_seed(SEED)
     dataset_name = args["dataset"]
     num_clients = args["num_clients"]
@@ -23,7 +23,11 @@ def client_worker(rank: int, args: dict):
     model_name = args["model"]
     model_dir = os.path.join("/share/models", model_name)
     split_point = args["split_point"]
-    device = f"cuda:{rank % 3}"  # use 3 gpus
+    available_gpus = [0,1, 2]
+    device = f"cuda:{available_gpus[rank % len(available_gpus)]}"
+   
+    lag_ratio = lag_ratios[rank % len(lag_ratios)]
+    
     log_dir = f"log/loss/{args['model']}/client_number_{args['num_clients']}/{args['version']}/client"
     logger = create_logger(log_file_name=f"client_{rank}.log", console_output=False, log_dir=log_dir)
     logger.info(f"client {rank} start with args: {args}")
@@ -48,8 +52,12 @@ def client_worker(rank: int, args: dict):
         dataset_train=data["train"],
         dataset_test=data["test"] if "test" in data else None,
         batch_num=min_batch_num,
+        lag_ratio=lag_ratio,
+        
     )
-    client.train_epoch()
+    # barrier.wait()
+    
+    client.train_epoch(barrier=barrier)
 
 
 def main():
@@ -65,20 +73,37 @@ def main():
     parser.add_argument("-NC", "--num_clients", type=int, default=2)
     parser.add_argument("-S", "--step", type=int, default=20)
     parser.add_argument("-V", "--version", type=str, default="v1")
-    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=20)
+    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=2)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-E", "--epoch", type=int, default=1)
-    parser.add_argument("-SP", "--split_point", type=int, default=2)
+    parser.add_argument("-SP", "--split_point", type=int, default=3)
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
+    parser.add_argument("-LAG", "--lag_ratio", type=int, default=0, help="simulate client computation lag by multiplying this ratio")
+    parser.add_argument("-QO","--queue_order", type=str, default="fifo", help="queue order for clients")
+    
     client_args = parser.parse_args()
     client_args = vars(client_args)
     num_clients = client_args["num_clients"]
     # mp.set_start_method("spawn", force=True)
     print("create client processes")
 
+    # simulate lag
+    lag_ratios_list = [
+        [1.0],
+        [1.0, 1.2],
+        [1.0, 1.2, 1.4],
+        [1.0, 1.25, 1.5, 1.75],
+        [1.0, 1.5, 2.0, 2.5],
+        [1.0, 2.0, 3.0, 4.0],
+    ]
+    lag_ratios = lag_ratios_list[client_args["lag_ratio"]]
+    print(f"lag_ratios for clients: {lag_ratios}")
+
+    barrier = mp.Barrier(num_clients)  # 所有 client 进程在这里同步
+    
     mp.spawn(
         client_worker,
-        args=(client_args,),
+        args=(client_args, lag_ratios, barrier, ),
         nprocs=num_clients,
         join=True,
     )

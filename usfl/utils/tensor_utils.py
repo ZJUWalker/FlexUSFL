@@ -19,7 +19,7 @@ def pad_inputs(input_ids: torch.Tensor, attention_mask: torch.Tensor, max_length
     """
     b, s = input_ids.shape
     if s >= max_length:
-        print(f"Input length {s} is already greater than or equal to max length {max_length}.")
+        # print(f"Input length {s} is already greater than or equal to max length {max_length}.")
         return input_ids, attention_mask
     else:
         padding_length = max_length - s

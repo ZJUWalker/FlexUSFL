@@ -25,7 +25,7 @@ def calculate_network_delay(data_size_bytes, bandwidth_mbps=10, propagation_dela
 
     # Calculate transmission delay in seconds
     transmission_delay = data_size_bytes / bandwidth_bytes_per_sec
-
+    print(f"transmission_delay: {transmission_delay:.3f} s for data size: {data_size_bytes/(1024*1024):.3f} MB at {bandwidth_mbps} Mbps")
     # Add propagation delay (convert ms to seconds)
     propagation_delay = propagation_delay_ms / 1000.0
 
@@ -51,8 +51,9 @@ class SocketCommunicator(object):
         host="localhost",
         port=8888,
         is_server=False,
-        buffer_size=4 * 4096,
+        buffer_size=4 * 1024,
         similuate_delay=True,
+        lag_ratio=1.0,
         **kwargs,
     ):
         self.host = host
@@ -64,11 +65,16 @@ class SocketCommunicator(object):
         self.buffer_size = buffer_size
         self.max_retry = kwargs.get("max_retry", 10)
         self.simuluate_delay = similuate_delay
+        self.rate_limit_mbps = 230 if self.simuluate_delay else 0  # 模拟网络带宽限制为 230 Mbps
+        self.lag_ratio = lag_ratio
         if self.is_server:
             self.clients = []  # 存储客户端连接
             self._init_server()
         else:
             self._init_client()
+
+        if self.lag_ratio > 1.0:
+            self.rate_limit_mbps = self.rate_limit_mbps / self.lag_ratio
 
     def __enter__(self):
         return self
@@ -117,35 +123,49 @@ class SocketCommunicator(object):
             return None, None
 
     def send(self, obj, conn=None):
-        """发送对象，带长度前缀"""
+        """发送对象，带长度前缀 + 限速，并返回 (发送MB, 耗时s)"""
         if conn is None:
             conn = self.conn
         try:
-            # 序列化对象并计算大小
-            start_time = time.time()
             data = pickle.dumps(obj)
-            # data_size = len(data)
-            # if self.simuluate_delay:
-            #     # 计算网络延迟（包括序列化和传输时间）
-            #     delay = calculate_network_delay(
-            #         data_size_bytes=data_size,
-            #         bandwidth_mbps=230,  # 可调整带宽（Mbps）
-            #         propagation_delay_ms=50,  # 可调整传播延迟（ms）
-            #         jitter_ms=0,  # 可调整抖动范围（ms）
-            #     )
+            length = len(data)  # payload 字节数
 
-            #     serialization_time = time.time() - start_time
-            #     total_delay = max(0, delay + serialization_time)  # 包含序列化时间
+            # 先发4字节长度头
+            conn.sendall(length.to_bytes(4, "big"))
 
-            #     time.sleep(total_delay)
+            # 发payload，并拿到耗时（含限速sleep）
+            send_time = self._sendall_with_rate(conn, data, self.buffer_size, self.rate_limit_mbps)
 
-            # 发送数据
-            length = len(data)
-            conn.sendall(length.to_bytes(4, byteorder="big"))  # 发送4字节长度
-            conn.sendall(data)
-        except socket.error as e:
-            print(f"[错误] 发送失败: {e}")
+            mb = length / (1024 * 1024)
+            return mb, send_time
+
+        except socket.error:
+            print("发送失败或结束训练")
             raise
+
+    def _sendall_with_rate(self, sock: socket.socket, data: bytes, chunk_bytes: int, rate_mbps: float):
+        """分片发送 + 限速，返回本次发送耗时（秒）"""
+        start = time.time()
+
+        # 不限速：直接发完返回真实耗时
+        if not rate_mbps or rate_mbps <= 0:
+            sock.sendall(data)
+            return time.time() - start
+
+        bytes_per_sec = rate_mbps * 1024 * 1024 / 8.0  # Mbps → B/s
+        sent = 0
+
+        for i in range(0, len(data), chunk_bytes):
+            part = data[i : i + chunk_bytes]
+            sock.sendall(part)
+            sent += len(part)
+
+            expected_elapsed = sent / bytes_per_sec
+            actual_elapsed = time.time() - start
+            if expected_elapsed > actual_elapsed:
+                time.sleep(expected_elapsed - actual_elapsed)
+
+        return time.time() - start
 
     def receive(self, conn=None):
         """接收对象，基于长度前缀"""

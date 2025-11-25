@@ -41,7 +41,7 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
     else:
         quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu")
+    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager")
 
     if client_args["use_qlora_4bit"] or client_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)
@@ -69,6 +69,7 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
             lora_alpha=32,
             lora_dropout=0.1,
             target_modules=["q_proj", "k_proj", "v_proj"],
+            # target_modules=["c_attn", "q_attn", "c_proj"],
         )
         head = get_peft_model(head, lora_config)
         tail = get_peft_model(tail, lora_config)
@@ -105,7 +106,7 @@ def load_server_model(
     else:
         quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu")
+    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager")
     model.train()
     if server_args["use_qlora_4bit"] or server_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)

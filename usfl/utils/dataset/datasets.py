@@ -4,7 +4,7 @@ from copy import deepcopy
 import pandas as pd
 import torch
 from datasets import load_dataset, Dataset
-from trl import DataCollatorForCompletionOnlyLM
+# from trl import DataCollatorForCompletionOnlyLM
 from usfl.utils.dataset.base import FedDataset
 from usfl import env as env_config
 from usfl.utils.dataset.exp import register_dataset
@@ -22,7 +22,7 @@ class PIQAFedDataset(FedDataset):
         self.a_temp = "### Solution:\n"
         if self.completion_only:
             response_template_ids = tokenizer.encode("\n" + self.a_temp, add_special_tokens=False)[2:]
-            self.co_collator = DataCollatorForCompletionOnlyLM(response_template=response_template_ids, tokenizer=tokenizer)
+            # self.co_collator = DataCollatorForCompletionOnlyLM(response_template=response_template_ids, tokenizer=tokenizer)
 
     def _format(self, example):
         q = self.q_temp + example["goal"]

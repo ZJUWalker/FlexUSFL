@@ -6,7 +6,13 @@ from typing import Tuple, Dict, Any
 import torch
 import torch.nn as nn
 
+from typing import Dict, List, Tuple
+import json
+from dataclasses import asdict
+import os
+
 from usfl.server.server_base import ServerBase
+from usfl.utils.timestamp_recorder import GanttChartData
 
 
 class ServerV2(ServerBase):
@@ -25,31 +31,39 @@ class ServerV2(ServerBase):
         super().__init__(server_args=server_args, server_device=server_device, num_clients=num_clients, logger=logger)
         self.lr = lr
         self.trunk_model = server_model.to(self.server_device).train()
+        self.profile_datas: Dict[int, GanttChartData] = {}  # 对应每一个客户端一个
         self.optimizer: torch.optim.Optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
         self.matrix_logger = matrix_logger
         self.server_output: torch.Tensor = None
         self.hidden_status_from_head: torch.Tensor = None
+        for client_id in range(self.num_clients):
+            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(5)]
+
+        queue_order_raw = server_args.get("queue_order", "lifo")  # （fifo / lifo）
+        self.queue_order = str(queue_order_raw).lower()
+
+        if self.queue_order == "lifo":
+            self.activation_queue = queue.LifoQueue()
+            self.gradient_queue = queue.LifoQueue()
+        else:
+            self.activation_queue = queue.Queue()
+            self.gradient_queue = queue.Queue()
 
     def _forward(
         self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: torch.Tensor = None
     ) -> torch.Tensor:
         try:
-            # self.logger.info(f"Client {client_id}: Acquiring lock for forward")
-            # with self.client_lock:
-            # self.logger.info(f"Client {client_id}: Lock acquired for forward")
             hidden_status_from_head = activation.to(self.server_device)
             hidden_status_from_head.requires_grad_(True)
             hidden_status_from_head.retain_grad()
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
-            fwd_start = time.time()
             server_output: torch.Tensor = self.trunk_model(
                 hidden_states=hidden_status_from_head,
                 attention_mask=attention_mask,
                 position_embeddings=pos_emb,
             )
             torch.cuda.synchronize(device=self.server_device)
-            self.compute_time += time.time() - fwd_start  # 用于记录计算时间
             server_output = server_output.requires_grad_(True)
             self.server_output = server_output
             self.hidden_status_from_head = hidden_status_from_head
@@ -61,23 +75,25 @@ class ServerV2(ServerBase):
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
             raise e
 
-    def _backward(self, client_id: int, server_grad: torch.Tensor) -> torch.Tensor:
+    def _backward(self, client_id: int, server_grad: torch.Tensor, batch_idx: int) -> torch.Tensor:
         try:
-            # self.logger.info(f"Client {client_id}: Acquiring lock for backward")
-            # with self.client_lock:
-            # self.logger.info(f"Client {client_id}: Lock acquired for backward")
+            torch.cuda.current_stream().synchronize()
+            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[0] = time.time()
             server_grad = server_grad.to(self.server_device)
-            start_bwd = time.time()
             self.optimizer.zero_grad()
             self.server_output.backward(server_grad)
-            torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+            torch.cuda.current_stream().synchronize()
+            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[1] = time.time()
+
+            # torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
+            torch.cuda.current_stream().synchronize()
+            self.profile_datas[client_id][batch_idx].server_step_timestamp[0] = time.time()
             self.optimizer.step()
-            torch.cuda.synchronize(device=self.server_device)
-            end_bwd = time.time()
-            self.compute_time += end_bwd - start_bwd  # 用于记录计算时间
             grad_to_head = self.hidden_status_from_head.grad.cpu()
+            torch.cuda.current_stream().synchronize()
+            self.profile_datas[client_id][batch_idx].server_step_timestamp[1] = time.time()
+
             torch.cuda.empty_cache()
-            # self.logger.info(f"Client {client_id}: Releasing lock for backward")
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Client {client_id}: Backward pass failed: {e}")
@@ -106,20 +122,28 @@ class ServerV2(ServerBase):
                     self.activation_queue.put(data)
                     response = self.server_activation_queues[client_id].get(timeout=60.0)
                     if response["client_id"] == client_id:
+                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
                         self._send_to_client(client_id, response)
+                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
                 elif "gradient" in data:
                     # self.logger.info(f"Received gradient from client_id={client_id} (addr={addr}): shape={data['gradient'].shape}")
                     self.gradient_queue.put(data)
                     response = self.server_activation_queues[client_id].get(timeout=60.0)
                     if response["client_id"] == client_id and "server_gradient" in response:
-                        self._send_to_client(client_id, response)
+                        try:
+                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
+                            self._send_to_client(client_id, response)
+                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[1] = time.time()
+                        except Exception as e:
+                            print(f"Error sending server gradient to client {addr} (client_id={client_id}): {e}")
+                            raise e
                 elif "aggregate" in data:
                     with self.client_lock:
                         self.client_head_model_params[client_id] = data["head_params"]
                         self.client_tail_model_params[client_id] = data["tail_params"]
                         self.client_model_losses[client_id] = data["loss"]
                         self.aggregate_count += 1
-                        if data['client_id'] == 0:
+                        if data["client_id"] == 0:
                             self.logger.info(f"Waiting for aggregation, step {data['step']}")
                         if self.aggregate_count == self.num_clients:
                             # aggregate the client models
@@ -152,6 +176,29 @@ class ServerV2(ServerBase):
                             torch.cuda.empty_cache()
                             torch.cuda.reset_peak_memory_stats(self.server_device)
                         pass
+                elif "stop" in data:
+                    self.stop_count += 1
+                    print(f"stop_count={self.stop_count}, num_clients={self.num_clients}")
+                    if self.stop_count == self.num_clients:
+                        print("All clients sent stop signal, server shutting down.")
+                        # print(self.profile_datas)
+                        serializable_dict = {key: [asdict(item) for item in lst[:-1]] for key, lst in self.profile_datas.items()}
+                        save_dir = os.path.join(
+                            "./vis",
+                            f"version_{self.server_args['version']}",
+                            f"model_{self.server_args['model'].split('/')[-1]}",
+                            f"dataset_{self.server_args['dataset']}",
+                            f"lag_{self.server_args['lag_ratio']}",
+                            f"client_num_{self.server_args['num_clients']}",
+                            # f"bps_{self.server_args['batch_per_sync']}",
+                            f"order_{self.server_args['queue_order']}",
+                        )
+                        os.makedirs(save_dir, exist_ok=True)
+
+                        save_path = save_dir + f"/server_profile_data.json"
+                        with open(save_path, "w", encoding="utf-8") as f:
+                            json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
+                        break
         except Exception as e:
             self.logger.error(f"Client {addr} (client_id={client_id}) error: {e}")
         finally:
@@ -171,15 +218,16 @@ class ServerV2(ServerBase):
     def compute_task(self):
         uncompleted_clients = list(range(self.num_clients))
         while True:
-            fwd_wait_time = time.time()
             try:
                 data = self.activation_queue.get_nowait()
-                fwd_start_time = time.time()
-                self.idle_time += fwd_start_time - fwd_wait_time
+
                 if data["client_id"] not in uncompleted_clients:
                     self.activation_queue.put(data, timeout=60.0)
                     time.sleep(0.001)
                     continue
+
+                torch.cuda.current_stream().synchronize()
+                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
                 # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
                 server_activation = self._forward(
                     data["client_id"],
@@ -187,21 +235,24 @@ class ServerV2(ServerBase):
                     data["attention_mask"] if "attention_mask" in data else None,
                     data["position_embeddings"] if "position_embeddings" in data else None,
                 )
-                self.server_activation_queues[data["client_id"]].put({"client_id": data["client_id"], "server_activation": server_activation})
+                self.server_activation_queues[data["client_id"]].put(
+                    {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]}
+                )
+                torch.cuda.current_stream().synchronize()
+                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+
                 # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
 
                 if data["is_training"] == False:
                     continue
-                bwd_wait_time = time.time()
+
                 while True:
                     try:
                         data = self.gradient_queue.get_nowait()
-                        bwd_start_time = time.time()
-                        self.idle_time += bwd_start_time - bwd_wait_time
                         # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
-                        d_activation_to_client = self._backward(data["client_id"], data["gradient"])
+                        d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
                         self.server_activation_queues[data["client_id"]].put(
-                            {"client_id": data["client_id"], "server_gradient": d_activation_to_client}
+                            {"client_id": data["client_id"], "server_gradient": d_activation_to_client, "batch_idx": data["batch_idx"]}
                         )
                         # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
 
@@ -212,8 +263,8 @@ class ServerV2(ServerBase):
                     except queue.Empty:
                         pass
 
-                    time.sleep(0.01)
+                    time.sleep(0.001)
             except queue.Empty:
                 pass
 
-            time.sleep(0.01)
+            time.sleep(0.001)
