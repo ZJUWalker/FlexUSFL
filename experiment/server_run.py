@@ -21,7 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
     parser.add_argument("-NC", "--num_clients", type=int, default=1, help="Number of clients")
     parser.add_argument("-BF", "--buffer_size", type=int, default=4096, help="Buffer size for socket communication")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:2", help="Device for server model")
+    parser.add_argument("-SD", "--server_device", type=str, default="cuda:1", help="Device for server model")
     parser.add_argument("-CKPT", "--use_checkpoint", action="store_true", help="Use checkpoint")
     parser.add_argument("-AVG", "--use_avg", action="store_true", help="Use checkpoint")
     parser.add_argument("-SCKPT", "--checkpoint_num", type=int, default=-1, help="Number of checkpoints to use")
@@ -30,8 +30,8 @@ if __name__ == "__main__":
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("-V", "--version", type=str, default="v1", help="usfl version")  # add a flag to specify the version of usfl
     parser.add_argument("-LAG", "--lag_ratio", type=int, default=0, help="simulate client computation lag by multiplying this ratio")
-    parser.add_argument("-QO","--queue_order", type=str, default="fifo", help="queue order for clients")
-    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=2)
+    parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
+    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=10)
     args = parser.parse_args()
     server_args = vars(args)
     set_seed(SEED)
@@ -70,7 +70,7 @@ if __name__ == "__main__":
             logger=logger,
             matrix_logger=matrix_logger,
         )
-    else:
+    elif version == "v3":
         server = ServerV3(
             server_args=server_args,
             server_model=server_model,
@@ -81,6 +81,19 @@ if __name__ == "__main__":
             logger=logger,
             matrix_logger=matrix_logger,
         )
+    elif version == "merge":
+        server = MergeServer(
+            server_args=server_args,
+            server_model=server_model,
+            server_device=server_args["server_device"],
+            num_clients=server_args["num_clients"],
+            lr=lr,
+            logger=logger,
+            matrix_logger=matrix_logger,
+        )
+    else:
+        raise ValueError(f"Unknown usfl version: {version}")
+
     # =====================================================================
     logger.info(
         "{} server start split point: {}, buffer size: {}B ,use lora {} ,use qlora {} ,use checkpoint {},checkpoint num {}".format(

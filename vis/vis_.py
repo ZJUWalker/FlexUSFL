@@ -13,8 +13,8 @@ parser.add_argument("-NC", "--client_num", type=int, default=3, help="Number of 
 parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
 parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
 parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
-parser.add_argument("-SB", "--start_batch", type=int, default=1, help="Start batch index")  # ✅ 新增
-parser.add_argument("-EB", "--end_batch", type=int, default=6, help="End batch index (None = all)")  # ✅ 新增
+parser.add_argument("-ST", "--start_time", type=float, default=None, help="Start time in ms (None = auto)")  # ✅ 改为时间
+parser.add_argument("-ET", "--end_time", type=float, default=None, help="End time in ms (None = auto)")  # ✅ 改为时间
 
 args = parser.parse_args()
 
@@ -25,8 +25,8 @@ client_num = args.client_num
 model = args.model.split("/")[-1]
 dataset = args.dataset
 queue_order = args.queue_order
-start_batch = args.start_batch  # ✅ 从命令行参数读取
-end_batch = args.end_batch  # ✅ 从命令行参数读取
+start_time_ms = args.start_time  # ✅ 时间窗口起点（ms）
+end_time_ms = args.end_time  # ✅ 时间窗口终点（ms）
 bps = 2
 
 # 读取数据
@@ -36,17 +36,6 @@ path = dir + "/server_profile_data_merged.json"
 with open(path, "r") as f:
     data = json.load(f)
 
-# ✅ 如果 end_batch 为 None，设置为最大 batch_idx
-if end_batch is None:
-    max_batch_idx = 0
-    for client_id, batches in data.items():
-        for batch in batches:
-            max_batch_idx = max(max_batch_idx, batch.get("batch_idx", 0))
-    end_batch = max_batch_idx
-    print(f"未指定 end_batch，自动设置为最大值: {end_batch}")
-
-print(f"绘制范围: Batch {start_batch} ~ {end_batch}")
-
 # 设置图形
 fig, ax = plt.subplots(figsize=(20, 7))
 
@@ -54,7 +43,7 @@ fig, ax = plt.subplots(figsize=(20, 7))
 colors = {
     "server_fwd": "#FF6B6B",
     "server_bwd": "#FF6B6B",
-    "server_step": "#1DD1A1",
+    "server_step": "#FF1B01",
     "head": "#3498DB",
     "tail": "#2ECC71",
     "client_step": "#E67E22",
@@ -74,26 +63,44 @@ def is_valid_timestamp(timestamps):
     return timestamps[0] is not None and timestamps[1] is not None
 
 
-# ✅ 辅助函数：过滤 batch 范围
-def filter_batches(batches, start, end):
-    """只保留 start_batch <= batch_idx <= end_batch 的数据"""
-    return [b for b in batches if start <= b.get("batch_idx", 0) <= end]
-
-
-# ✅ 计算时间基准（只考虑指定范围的 batch）
+# ✅ 计算全局时间基准（所有数据）
 min_time = float("inf")
+max_time = 0
 for client_id, batches in data.items():
-    filtered_batches = filter_batches(batches, start_batch, end_batch)
-    for batch in filtered_batches:
+    for batch in batches:
         for key, value in batch.items():
             if "timestamp" in key and isinstance(value, list):
                 valid_values = [v for v in value if v is not None]
                 if valid_values:
                     min_time = min(min_time, min(valid_values))
+                    max_time = max(max_time, max(valid_values))
 
 if min_time == float("inf"):
-    print("⚠️  警告：指定范围内没有有效的时间戳数据！")
+    print("⚠️  警告：没有有效的时间戳数据！")
     min_time = 0
+
+# ✅ 如果未指定时间窗口，使用全部范围
+if start_time_ms is None:
+    start_time_ms = 0
+if end_time_ms is None:
+    end_time_ms = (max_time - min_time) * 1000
+
+print(f"时间窗口: {start_time_ms:.1f} ms ~ {end_time_ms:.1f} ms")
+
+
+# ✅ 辅助函数：检查时间块是否在窗口内
+def is_in_time_window(timestamps, min_time, start_ms, end_ms):
+    """检查时间块是否与时间窗口有交集"""
+    if not is_valid_timestamp(timestamps):
+        return False
+
+    start, end = timestamps
+    start_rel_ms = (start - min_time) * 1000
+    end_rel_ms = (end - min_time) * 1000
+
+    # 时间块与窗口有交集
+    return not (end_rel_ms < start_ms or start_rel_ms > end_ms)
+
 
 # 行索引：server 在第 0 行，clients 从第 1 行开始
 row_map = {"server": 0}
@@ -109,9 +116,8 @@ patches = []
 
 for client_id, batches in data.items():
     client_id = int(client_id)
-    filtered_batches = filter_batches(batches, start_batch, end_batch)  # ✅ 过滤范围
 
-    for batch in filtered_batches:
+    for batch in batches:
         batch_idx = batch["batch_idx"]
         server_row = row_map["server"]
         client_row = row_map[f"client_{client_id}"]
@@ -119,7 +125,7 @@ for client_id, batches in data.items():
         # ---- Server forward ----
         if "server_fwd_timestamp" in batch:
             timestamps = batch["server_fwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -146,7 +152,7 @@ for client_id, batches in data.items():
         # ---- Server backward ----
         if "server_bwd_timestamp" in batch:
             timestamps = batch["server_bwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -174,7 +180,7 @@ for client_id, batches in data.items():
         # ---- Server step ----
         if "server_step_timestamp" in batch:
             timestamps = batch["server_step_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -201,7 +207,7 @@ for client_id, batches in data.items():
         # ---- Client head fwd ----
         if "head_fwd_timestamp" in batch:
             timestamps = batch["head_fwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -228,7 +234,7 @@ for client_id, batches in data.items():
         # ---- Client head bwd ----
         if "head_bwd_timestamp" in batch:
             timestamps = batch["head_bwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -256,7 +262,7 @@ for client_id, batches in data.items():
         # ---- Client tail fwd ----
         if "tail_fwd_timestamp" in batch:
             timestamps = batch["tail_fwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -283,7 +289,7 @@ for client_id, batches in data.items():
         # ---- Client tail bwd ----
         if "tail_bwd_timestamp" in batch:
             timestamps = batch["tail_bwd_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -311,7 +317,7 @@ for client_id, batches in data.items():
         # ---- Client step ----
         if "client_step_timestamp" in batch:
             timestamps = batch["client_step_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -338,7 +344,7 @@ for client_id, batches in data.items():
         # ---- Client fed avg timestamp ----
         if "client_fed_avg_timestamp" in batch:
             timestamps = batch["client_fed_avg_timestamp"]
-            if is_valid_timestamp(timestamps):
+            if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                 start, end = timestamps
                 start_rel = (start - min_time) * 1000
                 duration = (end - start) * 1000
@@ -368,7 +374,7 @@ for client_id, batches in data.items():
             key = f"{op}_timestamp"
             if key in batch:
                 timestamps = batch[key]
-                if is_valid_timestamp(timestamps):
+                if is_in_time_window(timestamps, min_time, start_time_ms, end_time_ms):
                     start, end = timestamps
                     start_rel = (start - min_time) * 1000
                     duration = (end - start) * 1000
@@ -405,33 +411,19 @@ ax.invert_yaxis()
 ax.set_xlabel("Time (ms)", fontsize=12)
 ax.grid(axis="x", alpha=0.3)
 
-# ✅ 计算并展示最右结束时间（只考虑指定范围的 batch）
-max_time = 0
-for client_id, batches in data.items():
-    filtered_batches = filter_batches(batches, start_batch, end_batch)
-    for batch in filtered_batches:
-        for key, value in batch.items():
-            if "timestamp" in key and isinstance(value, list):
-                valid_values = [v for v in value if v is not None]
-                if valid_values:
-                    max_time = max(max_time, max(valid_values))
+# ✅ 设置 x 轴范围为时间窗口
+ax.set_xlim(start_time_ms, end_time_ms)
 
-total_duration_ms = (max_time - min_time) * 1000
-ax.set_xlim(0, total_duration_ms)
-
-# 在图右下角标注终点时间
+# 在图右下角标注时间窗口信息
 ax.text(
     1.0,
     -0.08,
-    f"End: {total_duration_ms:.1f} ms",
-    # f"End: {total_duration_ms:.1f} ms\n(Batch {start_batch}-{end_batch})",  # ✅ 显示范围
+    f"Time Window: {start_time_ms:.1f} - {end_time_ms:.1f} ms",
     transform=ax.transAxes,
     ha="right",
     va="top",
     fontsize=12,
 )
-
-print(f"最右边结束时间: {total_duration_ms:.1f} ms")
 
 # ---- 图例 ----
 legend_elements = [
@@ -458,7 +450,7 @@ ax.legend(
 )
 
 plt.tight_layout()
-savepath = dir + f"/training_timeline.png"  # ✅ 文件名包含范围
+savepath = dir + f"/training_timeline_{start_time_ms:.0f}-{end_time_ms:.0f}ms.png"
 plt.savefig(savepath, dpi=300, bbox_inches="tight")
 plt.show()
 

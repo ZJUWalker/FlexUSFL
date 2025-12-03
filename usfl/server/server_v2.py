@@ -5,10 +5,9 @@ import time
 from typing import Tuple, Dict, Any
 import torch
 import torch.nn as nn
-
+from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Tuple
 import json
-from dataclasses import asdict
 import os
 
 from usfl.server.server_base import ServerBase
@@ -16,6 +15,9 @@ from usfl.utils.timestamp_recorder import GanttChartData
 
 
 class ServerV2(ServerBase):
+    """
+    V2: 所有客户端共享同一个 Server Trunk Model (共享权重)。
+    """
 
     def __init__(
         self,
@@ -27,37 +29,37 @@ class ServerV2(ServerBase):
         optimizer_clz: torch.optim.Optimizer.__class__ = torch.optim.AdamW,
         logger: logging.Logger = None,
         matrix_logger: logging.Logger = None,
+        enforce_sync: bool = True,
     ):
-        super().__init__(server_args=server_args, server_device=server_device, num_clients=num_clients, logger=logger)
+        super().__init__(
+            server_args=server_args, server_device=server_device, num_clients=num_clients, logger=logger, matrix_logger=matrix_logger
+        )
         self.lr = lr
+        self.enforce_sync = enforce_sync
+
+        # --- V2 特有逻辑：单模型 ---
         self.trunk_model = server_model.to(self.server_device).train()
-        self.profile_datas: Dict[int, GanttChartData] = {}  # 对应每一个客户端一个
-        self.optimizer: torch.optim.Optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
-        self.matrix_logger = matrix_logger
+        self.optimizer = optimizer_clz(self.trunk_model.parameters(), lr=self.lr)
+
         self.server_output: torch.Tensor = None
         self.hidden_status_from_head: torch.Tensor = None
-        for client_id in range(self.num_clients):
-            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(5)]
-
-        queue_order_raw = server_args.get("queue_order", "lifo")  # （fifo / lifo）
-        self.queue_order = str(queue_order_raw).lower()
-
-        if self.queue_order == "lifo":
-            self.activation_queue = queue.LifoQueue()
-            self.gradient_queue = queue.LifoQueue()
-        else:
-            self.activation_queue = queue.Queue()
-            self.gradient_queue = queue.Queue()
+        self.server_update_count = 0
 
     def _forward(
-        self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: torch.Tensor = None
+        self,
+        client_id: int,
+        activation: torch.Tensor,
+        attention_mask: torch.LongTensor,
+        position_embeddings: torch.Tensor = None,
     ) -> torch.Tensor:
         try:
             hidden_status_from_head = activation.to(self.server_device)
             hidden_status_from_head.requires_grad_(True)
             hidden_status_from_head.retain_grad()
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
-            pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
+            pos_emb = (
+                tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
+            )
             server_output: torch.Tensor = self.trunk_model(
                 hidden_states=hidden_status_from_head,
                 attention_mask=attention_mask,
@@ -69,7 +71,10 @@ class ServerV2(ServerBase):
             self.hidden_status_from_head = hidden_status_from_head
             activation_to_tail = server_output.cpu()
             torch.cuda.empty_cache()
-            # self.logger.info(f"Client {client_id}: Releasing lock for forward")
+            if self.queue_order == "straggler_fo":
+                self.client_fwd_progress[client_id] += 1
+                print(f"Client {client_id} forward progress: {self.client_fwd_progress[client_id]}")
+                print(f"client_fwd_progress: {self.client_fwd_progress}")
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
@@ -92,8 +97,12 @@ class ServerV2(ServerBase):
             grad_to_head = self.hidden_status_from_head.grad.cpu()
             torch.cuda.current_stream().synchronize()
             self.profile_datas[client_id][batch_idx].server_step_timestamp[1] = time.time()
-
             torch.cuda.empty_cache()
+
+            if self.queue_order == "straggler_fo":
+                self.client_bwd_progress[client_id] += 1
+                print(f"Client {client_id} backward progress: {self.client_bwd_progress[client_id]}")
+                print(f"client_bwd_progress: {self.client_bwd_progress}")
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Client {client_id}: Backward pass failed: {e}")
@@ -118,17 +127,16 @@ class ServerV2(ServerBase):
                                 self.logger.info(f"Assigned client_id={client_id} to addr={addr}")
                                 break
                 if "activation" in data:
-                    # self.logger.info(f"Received activation from client_id={client_id} (addr={addr}): shape={data['activation'].shape}")
-                    self.activation_queue.put(data)
-                    response = self.server_activation_queues[client_id].get(timeout=60.0)
+                    print(f"[Server] received activation from client {client_id} for batch {data['batch_idx']}, time: {time.time()}")
+                    self._put_to_queue(self.activation_queue, data, "forward")
+                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=60.0)
                     if response["client_id"] == client_id:
                         self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
                         self._send_to_client(client_id, response)
                         self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
                 elif "gradient" in data:
-                    # self.logger.info(f"Received gradient from client_id={client_id} (addr={addr}): shape={data['gradient'].shape}")
-                    self.gradient_queue.put(data)
-                    response = self.server_activation_queues[client_id].get(timeout=60.0)
+                    self._put_to_queue(self.gradient_queue, data, "backward")
+                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=60.0)
                     if response["client_id"] == client_id and "server_gradient" in response:
                         try:
                             self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
@@ -147,6 +155,7 @@ class ServerV2(ServerBase):
                             self.logger.info(f"Waiting for aggregation, step {data['step']}")
                         if self.aggregate_count == self.num_clients:
                             # aggregate the client models
+                            aggregate_client_models_start_time = time.time()
                             head_params_avg, tail_params_avg, loss = self._aggregate_client_models()
                             self.aggregate_count = 0
                             self.logger.info(f"Aggregated client models finished, avg loss: {loss}")
@@ -165,6 +174,7 @@ class ServerV2(ServerBase):
                                         "head_params": head_params_avg,
                                         "tail_params": tail_params_avg,
                                         "loss": loss,
+                                        "aggregate_start_time": aggregate_client_models_start_time,
                                     },
                                 )
                             self.matrix_logger.info(
@@ -216,14 +226,21 @@ class ServerV2(ServerBase):
                 )
 
     def compute_task(self):
+        if self.enforce_sync:
+            self._compute_task_sync()
+        else:
+            self._compute_task_async()
+
+    def _compute_task_sync(self):
         uncompleted_clients = list(range(self.num_clients))
+        temp_buffer = []
         while True:
             try:
-                data = self.activation_queue.get_nowait()
+                # data = self.activation_queue.get_nowait()
+                data = self._get_from_queue(self.activation_queue)
 
                 if data["client_id"] not in uncompleted_clients:
-                    self.activation_queue.put(data, timeout=60.0)
-                    time.sleep(0.001)
+                    temp_buffer.append(data)
                     continue
 
                 torch.cuda.current_stream().synchronize()
@@ -235,36 +252,100 @@ class ServerV2(ServerBase):
                     data["attention_mask"] if "attention_mask" in data else None,
                     data["position_embeddings"] if "position_embeddings" in data else None,
                 )
-                self.server_activation_queues[data["client_id"]].put(
-                    {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]}
+                self._put_to_queue(
+                    self.server_activation_queues[data["client_id"]],
+                    {
+                        "client_id": data["client_id"],
+                        "server_activation": server_activation,
+                        "batch_idx": data["batch_idx"],
+                    },
+                    phase="forward",
                 )
                 torch.cuda.current_stream().synchronize()
                 self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
 
-                # self.logger.info(f"Completed forward pass for client_id={data['client_id']}")
-
-                if data["is_training"] == False:
-                    continue
-
                 while True:
                     try:
-                        data = self.gradient_queue.get_nowait()
+                        data = self._get_from_queue(self.gradient_queue)
                         # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                         d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
-                        self.server_activation_queues[data["client_id"]].put(
-                            {"client_id": data["client_id"], "server_gradient": d_activation_to_client, "batch_idx": data["batch_idx"]}
+                        # self.server_activation_queues[data["client_id"]].put(
+                        #     {"client_id": data["client_id"], "server_gradient": d_activation_to_client, "batch_idx": data["batch_idx"]}
+                        # )
+                        self._put_to_queue(
+                            self.server_activation_queues[data["client_id"]],
+                            {
+                                "client_id": data["client_id"],
+                                "server_gradient": d_activation_to_client,
+                                "batch_idx": data["batch_idx"],
+                            },
+                            phase="backward",
                         )
                         # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
 
                         uncompleted_clients.remove(data["client_id"])
                         if len(uncompleted_clients) == 0:
                             uncompleted_clients = list(range(self.num_clients))
+                            for buffer_data in temp_buffer:
+                                self._put_to_queue(self.activation_queue, buffer_data, phase="forward")
+                                # self.activation_queue.put(buffer_data)
+                            temp_buffer = []
                         break
                     except queue.Empty:
-                        pass
+                        time.sleep(0.001)
 
-                    time.sleep(0.001)
             except queue.Empty:
-                pass
+                time.sleep(0.001)
 
-            time.sleep(0.001)
+    def _compute_task_async(self):
+        """非强同步版本：先到先服务，不等待其他客户端"""
+        while True:
+            try:
+                # data = self.activation_queue.get_nowait()
+                data = self._get_from_queue(self.activation_queue)
+
+                torch.cuda.current_stream().synchronize()
+                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
+                server_activation = self._forward(
+                    data["client_id"],
+                    data["activation"],
+                    data["attention_mask"] if "attention_mask" in data else None,
+                    data["position_embeddings"] if "position_embeddings" in data else None,
+                )
+                # self.server_activation_queues[data["client_id"]].put(
+                #     {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]}
+                # )
+                self._put_to_queue(
+                    self.server_activation_queues[data["client_id"]],
+                    {
+                        "client_id": data["client_id"],
+                        "server_activation": server_activation,
+                        "batch_idx": data["batch_idx"],
+                    },
+                    phase="forward",
+                )
+                torch.cuda.current_stream().synchronize()
+                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+
+                while True:
+                    try:
+                        # data = self.gradient_queue.get_nowait()
+                        data = self._get_from_queue(self.gradient_queue)
+                        d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
+                        # self.server_activation_queues[data["client_id"]].put(
+                        #     {"client_id": data["client_id"], "server_gradient": d_activation_to_client, "batch_idx": data["batch_idx"]}
+                        # )
+                        self._put_to_queue(
+                            self.server_activation_queues[data["client_id"]],
+                            {
+                                "client_id": data["client_id"],
+                                "server_gradient": d_activation_to_client,
+                                "batch_idx": data["batch_idx"],
+                            },
+                            phase="backward",
+                        )
+                        break
+                    except queue.Empty:
+                        time.sleep(0.001)
+            except queue.Empty:
+                time.sleep(0.001)

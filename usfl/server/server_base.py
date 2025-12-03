@@ -9,46 +9,88 @@ from typing import List, Tuple, Dict, Any, Optional
 import torch
 import torch.nn as nn
 import copy
-
+from dataclasses import dataclass, field
 import torch.utils.checkpoint
 from usfl.socket import SocketCommunicator
 from usfl.utils.exp import fed_avg_params, fed_average
+from usfl.utils.timestamp_recorder import GanttChartData
+from contextlib import contextmanager
+
+
+@dataclass(order=True)
+class PrioritizedItem:
+    priority: tuple = field(compare=True)  # (client_progress, batch_idx)
+    data: Any = field(compare=False)
 
 
 class ServerBase:
-
     def __init__(
         self,
         server_args: Dict[str, Any],
         server_device: torch.device,
         num_clients: int,
         logger: logging.Logger,
+        matrix_logger: logging.Logger = None,  # 下沉到 Base
+        enable_profiling: bool = False,
     ):
-        super().__init__()
         self.server_args = server_args
         self.server_device = server_device
         self.num_clients = num_clients
-        self.logger: logging.Logger = logger
-        self.communicator = SocketCommunicator(is_server=True, port=server_args["port"], buffer_size=server_args["buffer_size"])
-        self.aggregate_count = 0  # 跟踪聚合信号的计数器
-        self.client_head_model_params: Dict[int, List[nn.Parameter]] = {}  # 用于保存客户端模型的字典
-        self.client_tail_model_params: Dict[int, List[nn.Parameter]] = {}  # 用于保存客户端模型的字典
-        self.client_model_losses: Dict[int, float] = {}  # 用于保存客户端模型的损失
-        # --------------------------------------------------------------------------
-        self.activation_queue: Queue = Queue()  # 用于接收客户端的激活信号
-        self.server_activation_queues: Dict[int, Queue] = {cid: queue.Queue() for cid in range(self.num_clients)}  # 用于发送给客户端的激活信号
-        self.gradient_queue: Queue = Queue()  # 用于接收客户端的梯度信号
-        self.clients: List[Tuple[socket.socket, tuple, int]] = []  # 客户端连接信息
-        self.client_lock = threading.Lock()  # 用于同步客户端连接信息
-        self.compute_task_thread: threading.Thread = None  # 用于计算任务的线程
-        self.clients_comm_threads: List[threading.Thread] = []  # 用于处理客户端通信的线程
-        # ----------------------------------profile----------------------------------------
-        self.compute_time = 0  # 用于记录计算时间
-        self.aggregate_server_time = 0  # 用于记录聚合时间
-        self.aggregate_client_time = 0  # 用于记录聚合时间
-        self.idle_time = 0  # 用于记录空闲时间
-        self.stop_count = 0  # 用于记录停止信号的数量
-        pass
+        self.logger = logger
+        self.matrix_logger = matrix_logger
+
+        # --- 1. 通信与网络 ---
+        self.communicator = SocketCommunicator(is_server=True, port=server_args["port"], buffer_size=65536)
+        self.clients: List[Tuple[socket.socket, tuple, int]] = []
+        self.client_lock = threading.Lock()
+
+        # --- 2. 线程管理 ---
+        self.compute_task_thread: threading.Thread = None
+        self.clients_comm_threads: List[threading.Thread] = []
+
+        # --- 3. 队列与调度 (通用) ---
+        # 解析队列顺序配置 (FIFO/LIFO)
+        queue_order_raw = server_args.get("queue_order", "lifo")
+        self.queue_order = str(queue_order_raw).lower()
+        if self.logger:
+            self.logger.info(f"[Server] Using {self.queue_order.upper()} queues.")
+
+        # 统一使用 PriorityQueue (移除原代码中重复的 Queue 初始化)
+        self.activation_queue = queue.PriorityQueue()
+        self.gradient_queue = queue.PriorityQueue()
+        # 发送给客户端的队列通常不需要优先级，保持普通 Queue 即可，视需求而定
+        self.server_activation_queues: Dict[int, queue.Queue] = {cid: queue.Queue() for cid in range(self.num_clients)}
+
+        # --- 4. 状态与进度追踪 ---
+        self.aggregate_count = 0
+        self.client_head_model_params: Dict[int, List[nn.Parameter]] = {}
+        self.client_tail_model_params: Dict[int, List[nn.Parameter]] = {}
+        self.client_model_losses: Dict[int, float] = {}
+
+        # 进度追踪 (V1/V2/V3 通用)
+        self.client_fwd_progress = [0] * num_clients
+        self.client_bwd_progress = [0] * num_clients
+
+        # --- 5. Profile / 统计信息 ---
+        self.compute_time = 0
+        self.aggregate_server_time = 0
+        self.aggregate_client_time = 0
+        self.idle_time = 0
+        self.stop_count = 0
+
+        # 初始化 Profile 数据容器 (具体填充由子类或辅助函数完成)
+        self.enable_profiling = enable_profiling
+        self.profile_datas: Dict[int, Any] = {}
+        if self.enable_profiling:
+            self._init_profile_data()
+        else:
+            print("Profiling disabled. ")
+
+    def _init_profile_data(self):
+        """辅助方法：统一初始化 Profile 数据，避免子类重复代码"""
+        # 假设记录前 10 个 batch
+        for client_id in range(self.num_clients):
+            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(10)]
 
     @abstractmethod
     def _forward(
@@ -67,6 +109,36 @@ class ServerBase:
     @abstractmethod
     def compute_task(self, *args, **kwargs) -> None:
         raise NotImplementedError('Please implement "compute_task" method')
+
+    def _put_to_queue(self, q, data: Any, phase: str = "forward"):
+        c_id = data.get("client_id", 0)
+
+        if phase == "forward":
+            start_time = data.get("head_fwd_start_time", time.time())
+            current_progress = self.client_fwd_progress[c_id]
+        elif phase == "backward":
+            start_time = data.get("tail_start_time", time.time())
+            current_progress = self.client_bwd_progress[c_id]
+        else:
+            raise ValueError(f"Unknown phase: '{phase}'. Expected 'forward' or 'backward'.")
+
+        if self.queue_order == "fifo":
+            priority = (start_time, 0)
+        elif self.queue_order == "lifo":
+            priority = (-start_time, 0)
+        elif self.queue_order == "straggler_fo":
+            duration = time.time() - start_time
+            priority = (current_progress, -duration)
+        else:
+            priority = (start_time, 0)
+
+        q.put(PrioritizedItem(priority=priority, data=data))
+
+    def _get_from_queue(self, q, timeout=None):
+        if timeout is None:
+            return q.get_nowait().data
+        else:
+            return q.get(timeout=timeout).data
 
     # main function to start the server
     def run(self):
@@ -120,3 +192,42 @@ class ServerBase:
                     return False
         self.logger.warning(f"No connection found for client_id={client_id}")
         return False
+
+    @contextmanager
+    def _profile_scope(self, client_id: int, batch_idx: int, attr_name: str):
+        """
+        用于计时的上下文管理器。
+        自动处理：开关判断、CUDA同步、时间戳记录。
+        """
+        # 1. 如果没开 profiling，直接 yield 继续执行业务代码，不做任何操作
+        if not self.enable_profiling:
+            yield
+            return
+
+        # 2. 计时开始前操作
+        if self.server_device.type == "cuda":
+            # 使用 synchronize() 确保 GPU 操作已完成，否则计时不准
+            torch.cuda.synchronize(self.server_device)
+        start_time = time.time()
+
+        # 3. 执行业务代码
+        yield
+
+        # 4. 计时结束后操作
+        if self.server_device.type == "cuda":
+            torch.cuda.synchronize(self.server_device)
+        end_time = time.time()
+
+        # 5. 写入数据
+        try:
+            # 假设你的 GanttChartData 对象有对应的属性 (如 server_fwd_timestamp)
+            # 且该属性是一个列表或数组 [start, end]
+            record = self.profile_datas[client_id][batch_idx]
+            timestamp_list = getattr(record, attr_name)
+            timestamp_list[0] = start_time
+            timestamp_list[1] = end_time
+        except KeyError:
+            # 防止 client_id 或 batch_idx 超出范围导致崩溃
+            pass
+        except AttributeError:
+            self.logger.warning(f"Profile data missing attribute: {attr_name}")

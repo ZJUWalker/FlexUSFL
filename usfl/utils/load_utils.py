@@ -41,7 +41,9 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
     else:
         quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager"
+    )
 
     if client_args["use_qlora_4bit"] or client_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)
@@ -76,7 +78,9 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
     return head, tail, tokenizer
 
 
-def load_dataset(dataset_name: str = "gsm8k", tokenizer: AutoTokenizer = None, client_ids: List[int] = [0], batch_size: int = 4, max_seq_len: int = 256):
+def load_dataset(
+    dataset_name: str = "gsm8k", tokenizer: AutoTokenizer = None, client_ids: List[int] = [0], batch_size: int = 4, max_seq_len: int = 256
+):
     # usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
         dataset_name=dataset_name,
@@ -106,7 +110,9 @@ def load_server_model(
     else:
         quantization_config = None
 
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, quantization_config=quantization_config, device_map="cpu", attn_implementation="eager"
+    )
     model.train()
     if server_args["use_qlora_4bit"] or server_args["use_qlora_8bit"]:
         model = prepare_model_for_kbit_training(model)

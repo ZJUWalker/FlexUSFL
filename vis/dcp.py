@@ -80,7 +80,7 @@ def main():
     parser.add_argument("-NC", "--client_num", type=int, default=3, help="Number of clients")
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="model card")
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
-    parser.add_argument("-QO","--queue_order", type=str, default="fifo", help="queue order for clients")
+    parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
 
     args = parser.parse_args()
 
@@ -90,11 +90,12 @@ def main():
     model = args.model.split("/")[-1]
     dataset = args.dataset
     queue_order = args.queue_order
-    bps=2
+    bps = 2
     # 路径按需修改
-    dir = f"./version_{version}/model_{model}/dataset_{dataset}/lag_{lag}/client_num_{client_num}/bps_{bps}/order_{queue_order}"
+    dir = f"./version_{version}/model_{model}/dataset_{dataset}/lag_{lag}/client_num_{client_num}/order_{queue_order}"
+    print(f"合并路径: {dir}")
     SERVER_JSON = os.path.join(dir, "server_profile_data.json")
-    OUTPUT_JSON = os.path.join(dir, "server_profile_data.merged.json")  # 合并后的输出
+    OUTPUT_JSON = os.path.join(dir, "server_profile_data_merged.json")  # 合并后的输出
     BACKUP_JSON = os.path.join(dir, "server_profile_data.backup.json")  # 备份
     CLIENT_PATTERN = os.path.join(dir, "client_*_profile_data_sample.json")  # 自动发现 client_0/1/2 的文件
 

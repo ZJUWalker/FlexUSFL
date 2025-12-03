@@ -182,14 +182,20 @@ class SocketCommunicator(object):
 
             # 接收数据
             data = bytearray()
+            # recv_start = time.time() # 计时：开始接收
             while len(data) < length:
                 packet = conn.recv(min(self.buffer_size, length - len(data)))
                 if not packet:
                     return None
                 data.extend(packet)
-
+            # recv_end = time.time() # 计时：接收完毕
+            
             # 反序列化数据
+            # load_start = time.time() # 计时：开始反序列化
             obj = pickle.loads(data)
+            # load_end = time.time()   # 计时：反序列化完毕
+            # print(f"[Debug] 网络接收耗时: {recv_end - recv_start:.4f}s")
+            # print(f"[Debug] Pickle反序列化耗时: {load_end - load_start:.4f}s") # <--- 重点看这个
             return obj
         except socket.timeout:
             print(f"[错误] 接收超时，耗时: {time.time() - start_time:.3f}s")
