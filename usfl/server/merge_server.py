@@ -69,19 +69,11 @@ class MergeServer(ServerBase):
                                 self.logger.info(f"Assigned client_id={client_id} to addr={addr}")
                                 break
                 if "activation" in data:
-                    print(f"[Server] received activation from client {client_id} for batch {data['batch_idx']}, time: {time.time()}")
                     self._put_to_queue(self.activation_queue, data, "forward")
-                    print(f"[Server] received activation from client {client_id} for batch {data['batch_idx']}, time: {time.time()}")
                     response = self.server_activation_queues[client_id].get(timeout=60.0)
                     if response["client_id"] == client_id:
-                        print(
-                            f"[Server] sending server activation to client {client_id} for batch {response['batch_idx']}, time: {time.time()}"
-                        )
                         self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
                         self._send_to_client(client_id, response)
-                        print(
-                            f"[Server] sent server activation to client {client_id} for batch {response['batch_idx']}, time: {time.time()}"
-                        )
                         self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
                 elif "gradient" in data:
                     self._put_to_queue(self.gradient_queue, data, "backward")
@@ -188,7 +180,6 @@ class MergeServer(ServerBase):
                 if self.activation_queue.qsize() != self.num_clients:
                     continue
 
-                print(f"[Server] start processing activations for update {self.num_updates}, time: {time.time()}")
                 torch.cuda.current_stream().synchronize()
                 for i in range(self.num_clients):
                     self.profile_datas[i][self.num_updates].server_fwd_timestamp[0] = time.time()
@@ -346,22 +337,12 @@ class MergeServer(ServerBase):
 
     def _backward(self, server_grad: torch.FloatTensor) -> torch.FloatTensor:
         try:
-            # torch.cuda.current_stream().synchronize()
-            # self.profile_datas[client_id][batch_idx].server_bwd_timestamp[0] = time.time()
             server_grad = server_grad.to(self.server_device)
             self.optimizer.zero_grad()
             self.server_output.backward(server_grad)
-            # torch.cuda.current_stream().synchronize()
-            # self.profile_datas[client_id][batch_idx].server_bwd_timestamp[1] = time.time()
-
-            # torch.nn.utils.clip_grad_norm_(self.trunk_models[client_id].parameters(), max_norm=0.5)
-            # torch.cuda.current_stream().synchronize()
-            # self.profile_datas[client_id][batch_idx].server_step_timestamp[0] = time.time()
             self.optimizer.step()
             grad_to_head = self.hidden_status_from_head.grad.cpu()
-            # torch.cuda.current_stream().synchronize()
-            # self.profile_datas[client_id][batch_idx].server_step_timestamp[1] = time.time()
-            # self.client_bwd_progress[client_id] += 1
+
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Server backward pass failed: {e}")
