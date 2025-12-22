@@ -21,7 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b", help="Model card")
     parser.add_argument("-NC", "--num_clients", type=int, default=1, help="Number of clients")
     parser.add_argument("-BF", "--buffer_size", type=int, default=4096, help="Buffer size for socket communication")
-    parser.add_argument("-SD", "--server_device", type=str, default="cuda:1", help="Device for server model")
+    parser.add_argument("-SD", "--server_device", type=str, default="cuda:0", help="Device for server model")
     parser.add_argument("-CKPT", "--use_checkpoint", action="store_true", help="Use checkpoint")
     parser.add_argument("-AVG", "--use_avg", action="store_true", help="Use checkpoint")
     parser.add_argument("-SCKPT", "--checkpoint_num", type=int, default=-1, help="Number of checkpoints to use")
@@ -31,12 +31,31 @@ if __name__ == "__main__":
     parser.add_argument("-V", "--version", type=str, default="v1", help="usfl version")  # add a flag to specify the version of usfl
     parser.add_argument("-LAG", "--lag_ratio", type=int, default=0, help="simulate client computation lag by multiplying this ratio")
     parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
-    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=10)
+    parser.add_argument("-BPS", "--batch_per_sync", type=int, default=20)
+    parser.add_argument("--mode", type=str, default="main", help="main or hetero")
+
     args = parser.parse_args()
     server_args = vars(args)
     set_seed(SEED)
     # =====================================================================
-    log_dir = f"log/loss/{server_args['model']}/" f"client_number_{server_args['num_clients']}/{server_args['version']}/server"
+    if server_args["mode"] == "hetero":
+        root_name = "hetero"
+    elif server_args["mode"] == "main":
+        root_name = "exp_main"
+    else:
+        raise ValueError(f"Unknown mode: {server_args['mode']}")
+    log_dir = os.path.join(
+        "log",
+        root_name,
+        server_args["version"],
+        server_args["model"],
+        server_args["dataset"],
+        f"lag_{server_args['lag_ratio']}",
+        f"client_number_{server_args['num_clients']}",
+        server_args["queue_order"],
+        "server",
+    )
+
     logger = create_logger(log_file_name="training_steps.log", log_dir=log_dir, console_output=False)
     matrix_logger = create_logger(
         log_file_name="training_metrics.log",

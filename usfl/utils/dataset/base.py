@@ -9,11 +9,13 @@ from functools import partial
 from usfl.utils.dataset.exp import get_dra_test_label, get_dra_train_label
 from usfl.utils.dataset.exp import get_dataset
 import math
+import random
 
 
 class FedDataset(ABC):
     """
     Federated (Split) Learning Dataset
+    支持 'exclusive' (互斥切分) 和 'random_overlap' (随机重叠采样)
     """
 
     def __init__(
@@ -26,6 +28,9 @@ class FedDataset(ABC):
         num_labels=0,
         completion_only=False,
         uni_length: int = -1,
+        partition_mode: str = "exclusive",  # 选项: "exclusive", "random_overlap"
+        sample_ratio: float = 0.1,  # 仅在 random_overlap 模式下生效：每个客户端采样比例
+        seed: int = 42,  # 随机种子，保证实验可复现
     ):
         if not client_ids:
             client_ids = [0]
@@ -38,16 +43,37 @@ class FedDataset(ABC):
         self.completion_only = completion_only
         self.num_labels = num_labels
         self.uni_length = uni_length
+        random.seed(seed)
+
         for type in types:
             # 应用 shrink_frac 缩小数据集
             self.dataset[type] = self.all_dataset[type].select(range(int(len(self.all_dataset[type]) * shrink_frac)))
+
             # 将数据索引分为 len(client_ids) 个子集
             indices = list(range(len(self.dataset[type])))
-            shard_size = math.ceil(len(indices) / len(client_ids))  # 使用 ceil 处理不可整除
-            disable_progress_bar()
-            shards = [indices[i * shard_size : (i + 1) * shard_size] for i in range(len(client_ids))]
+            total_samples = len(indices)
+            num_clients = len(client_ids)
+
+            shards = []
+
+            # choose partition_mode
+            if partition_mode == "exclusive":
+                shard_size = math.ceil(total_samples / num_clients)
+                shards = [indices[i * shard_size : (i + 1) * shard_size] for i in range(num_clients)]
+            elif partition_mode == "random_overlap":
+                # 随机重叠采样
+                num_samples_per_client = int(total_samples * sample_ratio)
+                num_samples_per_client = max(1, min(num_samples_per_client, total_samples))
+
+                for _ in range(num_clients):
+                    # random.sample 是无放回采样（单个客户端内不重复），但不同客户端之间会重叠
+                    client_indices = random.sample(indices, k=num_samples_per_client)
+                    shards.append(client_indices)
+            else:
+                raise ValueError(f"Unsupported partition_mode: {partition_mode}")
+
             # 为每个客户端分配一个分片
-            self.client_data_indices[type] = {client_ids[i]: shards[i] for i in range(len(client_ids))}
+            self.client_data_indices[type] = {client_ids[i]: shards[i] for i in range(num_clients)}
 
     def _collate_fn(self, x, max_seq_len):
         return self._col_fun(x, max_seq_len=max_seq_len)
@@ -252,11 +278,15 @@ def get_client_dataloaders(
     max_seq_len=-1,
     splits=["train", "test"],
     shuffle=False,
+    partition_mode="exclusive",
+    sample_ratio=0.1,
 ):
     if not client_ids:
         raise ValueError("客户端 ID 列表不能为空。")
 
-    usl_dataset = get_dataset(dataset_name, tokenizer=tokenizer, client_ids=client_ids)
+    usl_dataset = get_dataset(
+        dataset_name, tokenizer=tokenizer, client_ids=client_ids, partition_mode=partition_mode, sample_ratio=sample_ratio
+    )
     client_dataloaders = {client_id: {} for client_id in client_ids}
 
     has_validation = False if dataset_name in ["codealpaca", "gsm8k"] else True

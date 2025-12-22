@@ -14,7 +14,7 @@ parser.add_argument("-M", "--model", type=str, default="meta-llama/llama3.2-1b",
 parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
 parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
 parser.add_argument("-SB", "--start_batch", type=int, default=1, help="Start batch index")  # ✅ 新增
-parser.add_argument("-EB", "--end_batch", type=int, default=6, help="End batch index (None = all)")  # ✅ 新增
+parser.add_argument("-EB", "--end_batch", type=int, default=None, help="End batch index (None = all)")  # ✅ 新增
 
 args = parser.parse_args()
 
@@ -48,7 +48,7 @@ if end_batch is None:
 print(f"绘制范围: Batch {start_batch} ~ {end_batch}")
 
 # 设置图形
-fig, ax = plt.subplots(figsize=(20, 7))
+fig, ax = plt.subplots(figsize=(40, 7))
 
 # 定义颜色映射
 colors = {
@@ -106,7 +106,7 @@ row_height = 0.8
 
 # 绘制时间线
 patches = []
-
+final_filtered_data = {}
 for client_id, batches in data.items():
     client_id = int(client_id)
     filtered_batches = filter_batches(batches, start_batch, end_batch)  # ✅ 过滤范围

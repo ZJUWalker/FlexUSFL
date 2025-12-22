@@ -43,12 +43,10 @@ class ServerV3(ServerV2):
         # self.checkpoint_clients=[]
         self.server_output_dict: Dict[int, torch.Tensor] = {}  # Dict[int, torch.Tensor]
         self.hidden_status_from_head_dict: Dict[int, torch.Tensor] = {}
-        self.profile_datas: Dict[int, GanttChartData] = {}  # 对应每一个客户端一个
 
         for client_id in range(self.num_clients):
             self.server_output_dict[client_id] = None
             self.hidden_status_from_head_dict[client_id] = None
-            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(10)]
 
         self.enforce_sync = enforce_sync
         if self.enforce_sync == False:
@@ -84,8 +82,6 @@ class ServerV3(ServerV2):
             torch.cuda.empty_cache()
             # if self.queue_order == "straggler_fo":
             self.client_fwd_progress[client_id] += 1
-            print(f"Client {client_id} forward progress: {self.client_fwd_progress[client_id]}")
-            print(f"client_fwd_progress: {self.client_fwd_progress}")
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
@@ -93,21 +89,15 @@ class ServerV3(ServerV2):
 
     def _backward(self, client_id: int, server_grad: torch.Tensor, batch_idx: int):
         try:
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[0] = time.time()
-            server_grad = server_grad.to(self.server_device)
-            self.server_output_dict[client_id].backward(server_grad)
-            torch.cuda.synchronize(self.server_device)
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[1] = time.time()
+            with self._profile_scope(client_id, batch_idx, "server_bwd_timestamp"):
+                server_grad = server_grad.to(self.server_device)
+                self.server_output_dict[client_id].backward(server_grad)
 
             grad_to_head = self.hidden_status_from_head_dict[client_id].grad.cpu()
             torch.cuda.empty_cache()
 
             # if self.queue_order == "straggler_fo":
             self.client_bwd_progress[client_id] += 1
-            print(f"Client {client_id} backward progress: {self.client_bwd_progress[client_id]}")
-            print(f"client_bwd_progress: {self.client_bwd_progress}")
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Client {client_id}: Backward pass failed: {e}")
@@ -132,21 +122,18 @@ class ServerV3(ServerV2):
                 if data["client_id"] not in unforwarded_clients:
                     temp_buffer.append(data)
                 else:
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-                    server_activation = self._forward(
-                        data["client_id"],
-                        data["activation"],
-                        data["attention_mask"] if "attention_mask" in data else None,
-                        data["position_embeddings"] if "position_embeddings" in data else None,
-                    )
-                    self._put_to_queue(
-                        self.server_activation_queues[data["client_id"]],
-                        {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]},
-                        phase="forward",
-                    )
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+                    with self._profile_scope(data["client_id"], data["batch_idx"], "server_fwd_timestamp"):
+                        server_activation = self._forward(
+                            data["client_id"],
+                            data["activation"],
+                            data["attention_mask"] if "attention_mask" in data else None,
+                            data["position_embeddings"] if "position_embeddings" in data else None,
+                        )
+                        self._put_to_queue(
+                            self.server_activation_queues[data["client_id"]],
+                            {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]},
+                            phase="forward",
+                        )
 
                     unforwarded_clients.remove(data["client_id"])
                     unbackwarded_clients.add(data["client_id"])
@@ -163,18 +150,12 @@ class ServerV3(ServerV2):
                 )
                 unbackwarded_clients.remove(data["client_id"])
                 if len(unbackwarded_clients) == 0 and len(unforwarded_clients) == 0:
-                    torch.cuda.current_stream().synchronize()
-                    step_start_time = time.time()
-                    for i in range(self.num_clients):
-                        self.profile_datas[i][self.num_updates].server_step_timestamp[0] = step_start_time
-                    self._update_server_model()
 
-                    torch.cuda.current_stream().synchronize()
-                    step_end_time = time.time()
-                    for i in range(self.num_clients):
-                        self.profile_datas[i][self.num_updates].server_step_timestamp[1] = step_end_time
+                    all_clients = list(range(self.num_clients))
+                    with self._profile_scope(all_clients, self.num_updates, "server_step_timestamp"):
+                        self._update_server_model()
+
                     unforwarded_clients = list(range(self.num_clients))
-
                     for buffered_data in temp_buffer:
                         self._put_to_queue(self.activation_queue, buffered_data)
 
@@ -189,21 +170,20 @@ class ServerV3(ServerV2):
         while True:
             try:
                 data = self._get_from_queue(self.activation_queue)
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-                server_activation = self._forward(
-                    data["client_id"],
-                    data["activation"],
-                    data["attention_mask"] if "attention_mask" in data else None,
-                    data["position_embeddings"] if "position_embeddings" in data else None,
-                )
-                self._put_to_queue(
-                    self.server_activation_queues[data["client_id"]],
-                    {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]},
-                    phase="forward",
-                )
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+
+                with self._profile_scope(data["client_id"], data["batch_idx"], "server_fwd_timestamp"):
+                    server_activation = self._forward(
+                        data["client_id"],
+                        data["activation"],
+                        data["attention_mask"] if "attention_mask" in data else None,
+                        data["position_embeddings"] if "position_embeddings" in data else None,
+                    )
+                    self._put_to_queue(
+                        self.server_activation_queues[data["client_id"]],
+                        {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]},
+                        phase="forward",
+                    )
+
             except queue.Empty:
                 pass
             try:
@@ -217,16 +197,10 @@ class ServerV3(ServerV2):
                 self.num_accumulated_grads += 1
 
                 if self.num_accumulated_grads == self.grad_accum_threshold:
-                    torch.cuda.current_stream().synchronize()
-                    step_start_time = time.time()
-                    for i in range(self.num_clients):
-                        self.profile_datas[i][self.num_updates].server_step_timestamp[0] = step_start_time
-                    self._update_server_model()
 
-                    torch.cuda.current_stream().synchronize()
-                    step_end_time = time.time()
-                    for i in range(self.num_clients):
-                        self.profile_datas[i][self.num_updates].server_step_timestamp[1] = step_end_time
+                    all_clients = list(range(self.num_clients))
+                    with self._profile_scope(all_clients, self.num_updates, "server_step_timestamp"):
+                        self._update_server_model()
 
                     self.num_accumulated_grads = 0
                     self.num_updates += 1
@@ -234,12 +208,6 @@ class ServerV3(ServerV2):
             except queue.Empty:
                 pass
             time.sleep(0.001)
-
-    # def handle_client_with_aggregation(self, conn, addr, *args, **kwargs):
-    #     super().handle_client_with_aggregation(conn, addr, *args, **kwargs)
-    #     if self.checkpoint_client_num >0:
-    #         self.checkpoint_client_num-=1
-    #         self.logger.info(f"Checkpoint client num decreased from {self.checkpoint_client_num+1} to {self.checkpoint_client_num}")
 
     @torch.no_grad()
     def _update_server_model(self):

@@ -29,7 +29,7 @@ class ServerV2(ServerBase):
         optimizer_clz: torch.optim.Optimizer.__class__ = torch.optim.AdamW,
         logger: logging.Logger = None,
         matrix_logger: logging.Logger = None,
-        enforce_sync: bool = True,
+        enforce_sync: bool = False,
     ):
         super().__init__(
             server_args=server_args, server_device=server_device, num_clients=num_clients, logger=logger, matrix_logger=matrix_logger
@@ -73,8 +73,8 @@ class ServerV2(ServerBase):
             torch.cuda.empty_cache()
             if self.queue_order == "straggler_fo":
                 self.client_fwd_progress[client_id] += 1
-                print(f"Client {client_id} forward progress: {self.client_fwd_progress[client_id]}")
-                print(f"client_fwd_progress: {self.client_fwd_progress}")
+                # print(f"Client {client_id} forward progress: {self.client_fwd_progress[client_id]}")
+                # print(f"client_fwd_progress: {self.client_fwd_progress}")
             return activation_to_tail
         except Exception as e:
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
@@ -82,27 +82,22 @@ class ServerV2(ServerBase):
 
     def _backward(self, client_id: int, server_grad: torch.Tensor, batch_idx: int) -> torch.Tensor:
         try:
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[0] = time.time()
-            server_grad = server_grad.to(self.server_device)
-            self.optimizer.zero_grad()
-            self.server_output.backward(server_grad)
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_bwd_timestamp[1] = time.time()
+            with self._profile_scope(client_id, batch_idx, "server_bwd_timestamp"):
+                server_grad = server_grad.to(self.server_device)
+                self.optimizer.zero_grad()
+                self.server_output.backward(server_grad)
 
             # torch.nn.utils.clip_grad_norm_(self.trunk_model.parameters(), max_norm=0.5)
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_step_timestamp[0] = time.time()
-            self.optimizer.step()
-            grad_to_head = self.hidden_status_from_head.grad.cpu()
-            torch.cuda.current_stream().synchronize()
-            self.profile_datas[client_id][batch_idx].server_step_timestamp[1] = time.time()
+            with self._profile_scope(client_id, batch_idx, "server_step_timestamp"):
+                self.optimizer.step()
+                grad_to_head = self.hidden_status_from_head.grad.cpu()
+
             torch.cuda.empty_cache()
 
             if self.queue_order == "straggler_fo":
                 self.client_bwd_progress[client_id] += 1
-                print(f"Client {client_id} backward progress: {self.client_bwd_progress[client_id]}")
-                print(f"client_bwd_progress: {self.client_bwd_progress}")
+                # print(f"Client {client_id} backward progress: {self.client_bwd_progress[client_id]}")
+                # print(f"client_bwd_progress: {self.client_bwd_progress}")
             return grad_to_head
         except Exception as e:
             self.logger.error(f"Client {client_id}: Backward pass failed: {e}")
@@ -127,21 +122,19 @@ class ServerV2(ServerBase):
                                 self.logger.info(f"Assigned client_id={client_id} to addr={addr}")
                                 break
                 if "activation" in data:
-                    print(f"[Server] received activation from client {client_id} for batch {data['batch_idx']}, time: {time.time()}")
+                    # print(f"[Server] received activation from client {client_id} for batch {data['batch_idx']}, time: {time.time()}")
                     self._put_to_queue(self.activation_queue, data, "forward")
-                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=60.0)
+                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=120.0)
                     if response["client_id"] == client_id:
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
-                        self._send_to_client(client_id, response)
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
+                        with self._profile_scope(response["client_id"], response["batch_idx"], "server_fwd_send_timestamp"):
+                            self._send_to_client(client_id, response)
                 elif "gradient" in data:
                     self._put_to_queue(self.gradient_queue, data, "backward")
-                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=60.0)
+                    response = self._get_from_queue(self.server_activation_queues[client_id], timeout=120.0)
                     if response["client_id"] == client_id and "server_gradient" in response:
                         try:
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
-                            self._send_to_client(client_id, response)
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[1] = time.time()
+                            with self._profile_scope(response["client_id"], response["batch_idx"], "server_bwd_send_timestamp"):
+                                self._send_to_client(client_id, response)
                         except Exception as e:
                             print(f"Error sending server gradient to client {addr} (client_id={client_id}): {e}")
                             raise e
@@ -210,7 +203,8 @@ class ServerV2(ServerBase):
                             json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
                         break
         except Exception as e:
-            self.logger.error(f"Client {addr} (client_id={client_id}) error: {e}")
+            # 注意：这里不需要把 e 放到 f-string 里，logger 会自动处理
+            self.logger.exception(f"Client {addr} (client_id={client_id}) failed")
         finally:
             with self.client_lock:
                 self.clients[:] = [(c, a, cid) for c, a, cid in self.clients if c != conn]
@@ -243,35 +237,27 @@ class ServerV2(ServerBase):
                     temp_buffer.append(data)
                     continue
 
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-                # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
-                server_activation = self._forward(
-                    data["client_id"],
-                    data["activation"],
-                    data["attention_mask"] if "attention_mask" in data else None,
-                    data["position_embeddings"] if "position_embeddings" in data else None,
-                )
-                self._put_to_queue(
-                    self.server_activation_queues[data["client_id"]],
-                    {
-                        "client_id": data["client_id"],
-                        "server_activation": server_activation,
-                        "batch_idx": data["batch_idx"],
-                    },
-                    phase="forward",
-                )
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+                with self._profile_scope(data["client_id"], data["batch_idx"], "server_fwd_timestamp"):
+                    server_activation = self._forward(
+                        data["client_id"],
+                        data["activation"],
+                        data["attention_mask"] if "attention_mask" in data else None,
+                        data["position_embeddings"] if "position_embeddings" in data else None,
+                    )
+                    self._put_to_queue(
+                        self.server_activation_queues[data["client_id"]],
+                        {
+                            "client_id": data["client_id"],
+                            "server_activation": server_activation,
+                            "batch_idx": data["batch_idx"],
+                        },
+                        phase="forward",
+                    )
 
                 while True:
                     try:
                         data = self._get_from_queue(self.gradient_queue)
-                        # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
                         d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
-                        # self.server_activation_queues[data["client_id"]].put(
-                        #     {"client_id": data["client_id"], "server_gradient": d_activation_to_client, "batch_idx": data["batch_idx"]}
-                        # )
                         self._put_to_queue(
                             self.server_activation_queues[data["client_id"]],
                             {
@@ -281,14 +267,12 @@ class ServerV2(ServerBase):
                             },
                             phase="backward",
                         )
-                        # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
 
                         uncompleted_clients.remove(data["client_id"])
                         if len(uncompleted_clients) == 0:
                             uncompleted_clients = list(range(self.num_clients))
                             for buffer_data in temp_buffer:
                                 self._put_to_queue(self.activation_queue, buffer_data, phase="forward")
-                                # self.activation_queue.put(buffer_data)
                             temp_buffer = []
                         break
                     except queue.Empty:
@@ -304,32 +288,26 @@ class ServerV2(ServerBase):
                 # data = self.activation_queue.get_nowait()
                 data = self._get_from_queue(self.activation_queue)
 
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-                server_activation = self._forward(
-                    data["client_id"],
-                    data["activation"],
-                    data["attention_mask"] if "attention_mask" in data else None,
-                    data["position_embeddings"] if "position_embeddings" in data else None,
-                )
-                # self.server_activation_queues[data["client_id"]].put(
-                #     {"client_id": data["client_id"], "server_activation": server_activation, "batch_idx": data["batch_idx"]}
-                # )
-                self._put_to_queue(
-                    self.server_activation_queues[data["client_id"]],
-                    {
-                        "client_id": data["client_id"],
-                        "server_activation": server_activation,
-                        "batch_idx": data["batch_idx"],
-                    },
-                    phase="forward",
-                )
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+                with self._profile_scope(data["client_id"], data["batch_idx"], "server_fwd_timestamp"):
+                    server_activation = self._forward(
+                        data["client_id"],
+                        data["activation"],
+                        data["attention_mask"] if "attention_mask" in data else None,
+                        data["position_embeddings"] if "position_embeddings" in data else None,
+                    )
+
+                    self._put_to_queue(
+                        self.server_activation_queues[data["client_id"]],
+                        {
+                            "client_id": data["client_id"],
+                            "server_activation": server_activation,
+                            "batch_idx": data["batch_idx"],
+                        },
+                        phase="forward",
+                    )
 
                 while True:
                     try:
-                        # data = self.gradient_queue.get_nowait()
                         data = self._get_from_queue(self.gradient_queue)
                         d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
                         # self.server_activation_queues[data["client_id"]].put(

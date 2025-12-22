@@ -84,21 +84,16 @@ class ServerV1(ServerBase):
 
                     response = self.server_activation_queues[client_id].get(timeout=10.0)
                     if response["client_id"] == client_id:
-                        if self.enable_profiling:
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
-                        self._send_to_client(client_id, response)
-                        if self.enable_profiling:
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
+                        with self._profile_scope(response["client_id"], response["batch_idx"], "server_fwd_send_timestamp"):
+                            self._send_to_client(client_id, response)
                 elif "gradient" in data:
                     self._put_to_queue(self.gradient_queue, data, "backward")
 
                     response = self.server_activation_queues[client_id].get(timeout=10.0)
                     if response["client_id"] == client_id and "server_gradient" in response:
-                        if self.enable_profiling:
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
-                        self._send_to_client(client_id, response)
-                        if self.enable_profiling:
-                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[1] = time.time()
+                        with self._profile_scope(response["client_id"], response["batch_idx"], "server_bwd_send_timestamp"):
+                            self._send_to_client(client_id, response)
+
                 elif "aggregate" in data:
                     # self.logger.info(f"Received aggregation request from client_id={client_id} (addr={addr})")
                     with self.client_lock:
@@ -150,22 +145,8 @@ class ServerV1(ServerBase):
                     self.stop_count += 1
                     print(f"stop_count={self.stop_count}, num_clients={self.num_clients}")
                     if self.stop_count == self.num_clients:
-                        print("All clients sent stop signal, server shutting down.")
-                        serializable_dict = {key: [asdict(item) for item in lst[:-1]] for key, lst in self.profile_datas.items()}
-                        save_dir = os.path.join(
-                            "./vis",
-                            f"version_{self.server_args['version']}",
-                            f"model_{self.server_args['model'].split('/')[-1]}",
-                            f"dataset_{self.server_args['dataset']}",
-                            f"lag_{self.server_args['lag_ratio']}",
-                            f"client_num_{self.server_args['num_clients']}",
-                            f"order_{self.queue_order}",
-                        )
-                        os.makedirs(save_dir, exist_ok=True)
-
-                        save_path = save_dir + f"/server_profile_data.json"
-                        with open(save_path, "w", encoding="utf-8") as f:
-                            json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
+                        if self.enable_profiling:
+                            self._save_profile_data()
                         break
         except Exception as e:
             self.logger.error(f"Client {addr} (client_id={client_id}) error: {e}")
@@ -193,49 +174,36 @@ class ServerV1(ServerBase):
     def _compute_task_sync(self) -> None:
         while True:
             try:
-                data = self._get_from_queue(self.activation_queue)
+                fwd_data = self._get_from_queue(self.activation_queue)
 
-                if self.enable_profiling:
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-
-                # self.logger.info(f"Processing activation for client_id={data['client_id']}, queue size={self.activation_queue.qsize()}")
-
-                server_activation = self._forward(
-                    data["client_id"],
-                    data["activation"],
-                    data["attention_mask"] if "attention_mask" in data else None,
-                    data["position_embeddings"] if "position_embeddings" in data else None,
-                )
-                self.server_activation_queues[data["client_id"]].put(
-                    {
-                        "client_id": data["client_id"],
-                        "batch_idx": data["batch_idx"],
-                        "server_activation": server_activation,
-                    }
-                )
-
-                if self.enable_profiling:
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
+                with self._profile_scope(fwd_data["client_id"], fwd_data["batch_idx"], "server_fwd_timestamp"):
+                    server_activation = self._forward(
+                        fwd_data["client_id"],
+                        fwd_data["activation"],
+                        fwd_data["attention_mask"] if "attention_mask" in fwd_data else None,
+                        fwd_data["position_embeddings"] if "position_embeddings" in fwd_data else None,
+                    )
+                    self.server_activation_queues[fwd_data["client_id"]].put(
+                        {
+                            "client_id": fwd_data["client_id"],
+                            "batch_idx": fwd_data["batch_idx"],
+                            "server_activation": server_activation,
+                        }
+                    )
 
             except queue.Empty:
                 pass
             try:
-                # data = self.gradient_queue.get_nowait()
-                data = self._get_from_queue(self.gradient_queue)
-                # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
+                bwd_data = self._get_from_queue(self.gradient_queue)
+                d_activation_to_client = self._backward(bwd_data["client_id"], bwd_data["gradient"], bwd_data["batch_idx"])
 
-                d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
-
-                self.server_activation_queues[data["client_id"]].put(
+                self.server_activation_queues[bwd_data["client_id"]].put(
                     {
-                        "client_id": data["client_id"],
-                        "batch_idx": data["batch_idx"],
+                        "client_id": bwd_data["client_id"],
+                        "batch_idx": bwd_data["batch_idx"],
                         "server_gradient": d_activation_to_client,
                     }
                 )
-                # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
             except queue.Empty:
                 pass
             time.sleep(0.01)
@@ -245,35 +213,26 @@ class ServerV1(ServerBase):
             try:
                 data = self._get_from_queue(self.activation_queue)
 
-                if self.enable_profiling:
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[0] = time.time()
-                server_activation = self._forward(
-                    data["client_id"],
-                    data["activation"],
-                    data["attention_mask"] if "attention_mask" in data else None,
-                    data["position_embeddings"] if "position_embeddings" in data else None,
-                )
-                self.server_activation_queues[data["client_id"]].put(
-                    {
-                        "client_id": data["client_id"],
-                        "batch_idx": data["batch_idx"],
-                        "server_activation": server_activation,
-                    }
-                )
-                if self.enable_profiling:
-                    torch.cuda.current_stream().synchronize()
-                    self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
-
+                with self._profile_scope(data["client_id"], data["batch_idx"], "server_fwd_timestamp"):
+                    server_activation = self._forward(
+                        data["client_id"],
+                        data["activation"],
+                        data["attention_mask"] if "attention_mask" in data else None,
+                        data["position_embeddings"] if "position_embeddings" in data else None,
+                    )
+                    self.server_activation_queues[data["client_id"]].put(
+                        {
+                            "client_id": data["client_id"],
+                            "batch_idx": data["batch_idx"],
+                            "server_activation": server_activation,
+                        }
+                    )
             except queue.Empty:
                 pass
             try:
-                # data = self.gradient_queue.get_nowait()
                 data = self._get_from_queue(self.gradient_queue)
-                # self.logger.info(f"Processing gradient for client_id={data['client_id']}, queue size={self.gradient_queue.qsize()}")
 
                 d_activation_to_client = self._backward(data["client_id"], data["gradient"], data["batch_idx"])
-
                 self.server_activation_queues[data["client_id"]].put(
                     {
                         "client_id": data["client_id"],
@@ -281,10 +240,10 @@ class ServerV1(ServerBase):
                         "server_gradient": d_activation_to_client,
                     }
                 )
-                # self.logger.info(f"Completed backward pass for client_id={data['client_id']}")
+
             except queue.Empty:
                 pass
-            time.sleep(0.01)
+            time.sleep(0.001)
 
     def _forward(
         self,
@@ -319,25 +278,16 @@ class ServerV1(ServerBase):
 
     def _backward(self, client_id: int, server_grad: torch.FloatTensor, batch_idx: int) -> torch.FloatTensor:
         try:
-            if self.enable_profiling:
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[client_id][batch_idx].server_bwd_timestamp[0] = time.time()
-            server_grad = server_grad.to(self.server_device)
-            self.optimizers[client_id].zero_grad()
-            self.server_hidden_states_output[client_id].backward(server_grad)
-            if self.enable_profiling:
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[client_id][batch_idx].server_bwd_timestamp[1] = time.time()
+            with self._profile_scope(client_id, batch_idx, "server_bwd_timestamp"):
+                server_grad = server_grad.to(self.server_device)
+                self.optimizers[client_id].zero_grad()
+                self.server_hidden_states_output[client_id].backward(server_grad)
 
             # torch.nn.utils.clip_grad_norm_(self.trunk_models[client_id].parameters(), max_norm=0.5)
-            if self.enable_profiling:
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[client_id][batch_idx].server_step_timestamp[0] = time.time()
-            self.optimizers[client_id].step()
-            grad_to_head = self.hidden_states_from_head[client_id].grad.cpu()
-            if self.enable_profiling:
-                torch.cuda.current_stream().synchronize()
-                self.profile_datas[client_id][batch_idx].server_step_timestamp[1] = time.time()
+            with self._profile_scope(client_id, batch_idx, "server_step_timestamp"):
+                self.optimizers[client_id].step()
+                grad_to_head = self.hidden_states_from_head[client_id].grad.cpu()
+
             self.client_bwd_progress[client_id] += 1
             return grad_to_head
         except Exception as e:
@@ -372,3 +322,33 @@ class ServerV1(ServerBase):
         except Exception as e:
             self.logger.error(f"Aggregation failed: {e}")
             raise e
+
+    def _save_profile_data(self):
+        """将 Profile 数据保存到磁盘"""
+        print("All clients sent stop signal, server shutting down. Saving profile data...")
+
+        try:
+            serializable_dict = {
+                key: [asdict(item) for item in lst if hasattr(item, "batch_idx")]  # 或者保留你的 [:-1]
+                for key, lst in self.profile_datas.items()
+            }
+
+            # 使用 .get 避免字典键不存在报错
+            save_dir = os.path.join(
+                "./vis",
+                f"version_{self.server_args.get('version', 'unknown')}",
+                f"model_{str(self.server_args.get('model', 'unknown')).split('/')[-1]}",
+                f"dataset_{self.server_args.get('dataset', 'unknown')}",
+                f"lag_{self.server_args.get('lag_ratio', 'unknown')}",
+                f"client_num_{self.server_args.get('num_clients', 'unknown')}",
+                f"order_{getattr(self, 'queue_order', 'unknown')}",
+            )
+            os.makedirs(save_dir, exist_ok=True)
+
+            save_path = os.path.join(save_dir, "server_profile_data.json")
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
+
+            self.logger.info(f"Profile data saved to {save_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save profile data: {e}")

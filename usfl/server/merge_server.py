@@ -55,7 +55,15 @@ class MergeServer(ServerBase):
         try:
             client_conn.settimeout(60.0)
             while True:
-                data: Dict = self.communicator.receive(client_conn)
+                try:
+                    data: Dict = self.communicator.receive(client_conn)
+                except socket.timeout:
+                    self.logger.error(f"Client {addr} (ID: {client_id}) timed out while waiting for data.")
+                    break  # 或者 continue，视逻辑而定
+                except Exception as e:
+                    self.logger.error(f"Error receiving data from Client {addr} (ID: {client_id}): {e}")
+                    break
+
                 if data is None:
                     self.logger.info(f"Client {addr} disconnected")
                     break
@@ -70,19 +78,44 @@ class MergeServer(ServerBase):
                                 break
                 if "activation" in data:
                     self._put_to_queue(self.activation_queue, data, "forward")
-                    response = self.server_activation_queues[client_id].get(timeout=60.0)
-                    if response["client_id"] == client_id:
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[0] = time.time()
-                        self._send_to_client(client_id, response)
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_fwd_send_timestamp[1] = time.time()
+                    try:
+                        # 尝试获取结果，设置超时
+                        response = self.server_activation_queues[client_id].get(timeout=60.0)
+
+                        # 检查 response 是否有效
+                        if response is None:
+                            raise ValueError(f"Got None from server_activation_queue for Client {client_id}")
+
+                        if response["client_id"] == client_id:
+                            with self._profile_scope(response["client_id"], response["batch_idx"], "server_fwd_send_timestamp"):
+                                self._send_to_client(client_id, response)
+                        else:
+                            self.logger.error(f"ID Mismatch! Expected {client_id}, got {response['client_id']}")
+
+                    except queue.Empty:
+                        self.logger.error(
+                            f"Timeout waiting for server forward computation for Client {client_id} (Batch {data.get('batch_idx')})"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Error processing forward response for Client {client_id}: {e}")
+
                 elif "gradient" in data:
                     self._put_to_queue(self.gradient_queue, data, "backward")
 
-                    response = self.server_activation_queues[client_id].get(timeout=60.0)
-                    if response["client_id"] == client_id and "server_gradient" in response:
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
-                        self._send_to_client(client_id, response)
-                        self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[1] = time.time()
+                    try:
+                        response = self.server_activation_queues[client_id].get(timeout=60.0)
+
+                        if response is None:
+                            raise ValueError(f"Got None from server_activation_queue (Backward) for Client {client_id}")
+
+                        if response["client_id"] == client_id and "server_gradient" in response:
+                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[0] = time.time()
+                            self._send_to_client(client_id, response)
+                            self.profile_datas[response["client_id"]][response["batch_idx"]].server_bwd_send_timestamp[1] = time.time()
+                    except queue.Empty:
+                        self.logger.error(f"Timeout waiting for server backward computation for Client {client_id}")
+                    except Exception as e:
+                        self.logger.error(f"Error processing backward response for Client {client_id}: {e}")
                 elif "aggregate" in data:
                     with self.client_lock:
                         try:
@@ -194,6 +227,7 @@ class MergeServer(ServerBase):
 
                 while not self.activation_queue.empty():
                     data = self._get_from_queue(self.activation_queue)
+                    print(f"Processing activation for client_id={data['client_id']}, batch index={data['batch_idx']}")
 
                     c_id = data.get("client_id")
                     b_idx = data.get("batch_idx")
@@ -210,10 +244,19 @@ class MergeServer(ServerBase):
 
                     # 收集 Position Embeddings (Tuple 处理)
                     if "position_embeddings" in data and data["position_embeddings"] is not None:
-                        # 假设格式是 (cos, sin)
                         pos_emb = data["position_embeddings"]
-                        pos_cos_list.append(pos_emb[0])
-                        pos_sin_list.append(pos_emb[1])
+                        cos = pos_emb[0]
+                        sin = pos_emb[1]
+
+                        # 关键修复：检查第一维是否与 activation 的 batch_size 一致
+                        # 如果客户端传的是 [1, seq, dim]，通过 expand 扩展成 [4, seq, dim]
+                        if cos.size(0) != current_sample_count:
+                            # 使用 expand 不会增加显存占用，只是改变视图
+                            cos = cos.expand(current_sample_count, *cos.shape[1:])
+                            sin = sin.expand(current_sample_count, *sin.shape[1:])
+
+                        pos_cos_list.append(cos)
+                        pos_sin_list.append(sin)
 
                 server_inputs = torch.cat(activations_list, dim=0)
 
@@ -252,8 +295,6 @@ class MergeServer(ServerBase):
                 torch.cuda.current_stream().synchronize()
                 for i in range(self.num_clients):
                     self.profile_datas[i][self.num_updates].server_fwd_timestamp[1] = time.time()
-                # torch.cuda.current_stream().synchronize()
-                # self.profile_datas[data["client_id"]][data["batch_idx"]].server_fwd_timestamp[1] = time.time()
 
                 while True:
                     try:

@@ -13,6 +13,7 @@ from usfl.utils.timestamp_recorder import GanttChartData
 import json
 from dataclasses import asdict
 import os
+from contextlib import contextmanager
 
 
 class Client(object):
@@ -29,7 +30,7 @@ class Client(object):
         dataset_train: Dataset,
         dataset_test: Dataset,
         batch_num: int,
-        enable_profiling: bool = False,
+        enable_profiling: bool = True,
         lag_ratio: float = 0.0,
     ):
         self.client_device = client_device
@@ -61,6 +62,8 @@ class Client(object):
         self.lag_ratio = lag_ratio
         self._did_global_barrier = False
         self._barrier_times = 0  # 新增：记录已经同步了几次
+        self.start_time = time.time()
+        print(f"client {self.client_id} train_loader len: {len(self.train_loader)}")
 
     def train_epoch(self, barrier=None):
         """
@@ -73,6 +76,11 @@ class Client(object):
         self.avg_loss.reset()
         batch_per_sync = self.client_args["batch_per_sync"]
         print("max seq len: ", self.client_args["max_seq_len"])
+
+        MAX_ROUNDS = 6
+        current_round = 0
+        stop_training = False  # 用于跳出外层 epoch 循环
+
         with SocketCommunicator(
             host="localhost",
             port=self.client_args["port"],
@@ -84,8 +92,11 @@ class Client(object):
             start_time = time.time()
             aggregated = False
             for epoch in range(self.local_ep):
+
+                if stop_training:
+                    break
+
                 self.train_logger.info(f"[Client {self.client_id}] start train epoch {epoch+1}, data loader len: {len(self.train_loader)}")
-                n = 0
                 print(f"[Client {self.client_id}] connected to server, time={time.time()}")
                 for batch_idx, batch in enumerate(self.train_loader, 0):
                     if aggregated:
@@ -120,7 +131,7 @@ class Client(object):
                             f"[Client {self.client_id} Aggregated],avg loss {client_aggregate_result['loss']:.4f},"
                             f"max memory: {torch.cuda.max_memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
                             f"max memory reserved: {torch.cuda.max_memory_reserved(device=self.client_device) / 1024**3:.4f} GB"
-                            f"time used:{time.time() - start_time:.2f} s"
+                            f"time used:{time.time() - self.start_time:.2f} s"
                         )
                         # update model
                         self._update_model_params(self.head_model, client_aggregate_result["head_params"])
@@ -134,27 +145,36 @@ class Client(object):
                             self.profile_data[batch_idx].client_fed_avg_timestamp[0] = client_aggregate_result["aggregate_start_time"]
                         aggregated = True
 
-                    # n += 1
-                    # if n >= 10:
-                    #     client.send("stop")
-                    #     data_to_save = [asdict(x) for x in self.profile_data[:10]]
-                    #     save_dir = os.path.join(
-                    #         "./vis",
-                    #         f"version_{self.client_args['version']}",
-                    #         f"model_{self.client_args['model'].split('/')[-1]}",
-                    #         f"dataset_{self.client_args['dataset']}",
-                    #         f"lag_{self.client_args['lag_ratio']}",
-                    #         f"client_num_{self.client_args['num_clients']}",
-                    #         # f"bps_{self.client_args['batch_per_sync']}",
-                    #         f"order_{self.client_args['queue_order']}",
-                    #     )
-                    #     os.makedirs(save_dir, exist_ok=True)
-                    #     save_path = os.path.join(save_dir, f"client_{self.client_id}_profile_data_sample.json")
-                    #     with open(save_path, "w", encoding="utf-8") as f:
-                    #         json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-                    #     break
-                    # if batch_idx == self.batch_num:
-                    #     break
+                        current_round += 1
+                        self.train_logger.info(f"[Client {self.client_id}] Completed Round {current_round}/{MAX_ROUNDS}")
+
+                        if current_round >= MAX_ROUNDS:
+                            self.train_logger.info(f"[Client {self.client_id}] Reached {MAX_ROUNDS} rounds. Stopping...")
+
+                            # 发送停止信号给 Server (Server 需要字典格式)
+                            client.send({"stop": True, "client_id": self.client_id})
+
+                            # 保存 Profiling 数据 (如果需要)
+                            if self.enable_profiling:
+                                data_to_save = [asdict(x) for x in self.profile_data[: batch_idx + 1]]  # 只保存跑过的数据
+                                save_dir = os.path.join(
+                                    "./vis",
+                                    f"version_{self.client_args['version']}",
+                                    f"model_{self.client_args['model'].split('/')[-1]}",
+                                    f"dataset_{self.client_args['dataset']}",
+                                    f"lag_{self.client_args['lag_ratio']}",
+                                    f"client_num_{self.client_args['num_clients']}",
+                                    f"order_{self.client_args['queue_order']}",
+                                )
+                                os.makedirs(save_dir, exist_ok=True)
+                                save_path = os.path.join(save_dir, f"client_{self.client_id}_profile_data.json")
+                                with open(save_path, "w", encoding="utf-8") as f:
+                                    json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+                                self.train_logger.info(f"Profile data saved to {save_path}")
+
+                            stop_training = True  # 设置标志位
+                            break  # 跳出 batch 循环
+
             end_time = time.time()
             self.train_logger.info(
                 f"[Client {self.client_id} Finished] train epoch time: {end_time - start_time:.2f} s, compute time: {self.compute_time:.2f} s"
@@ -171,7 +191,7 @@ class Client(object):
         pass
 
     def train_batch(self, batch: Dict, client: SocketCommunicator, batch_idx: int, barrier=None):
-        print(f"[Client {self.client_id}] start train batch {batch_idx}")
+        # print(f"[Client {self.client_id}] start train batch {batch_idx}")
         input_ids = batch["input_ids"].to(self.client_device)
         attention_mask = batch["attention_mask"].to(self.client_device)
 
@@ -181,147 +201,113 @@ class Client(object):
         if barrier is not None and self._barrier_times < 2:
             barrier.wait()
             self._barrier_times += 1
+            self.start_time = time.time()  # 记录同步时间
 
-        torch.cuda.current_stream().synchronize()
-        head_fwd_start_time = time.time()
-
-        if self.enable_profiling:
-            self.profile_data[batch_idx].head_fwd_timestamp[0] = head_fwd_start_time
-        head_outs = self.head_model.forward(input_ids, attention_mask)
-        head_outs[0].requires_grad_(True)
-        attention_mask = head_outs[1]
-        torch.cuda.current_stream().synchronize()
-        if self.lag_ratio > 1.0:
-            delay_time = (time.time() - self.profile_data[batch_idx].head_fwd_timestamp[0]) * (self.lag_ratio - 1.0)
-            time.sleep(delay_time)
-
-        if self.enable_profiling:
-            self.profile_data[batch_idx].head_fwd_timestamp[1] = time.time()
+        with self._profile_scope(batch_idx, "head_fwd_timestamp") as head_fwd_start_time:
+            head_outs = self.head_model.forward(input_ids, attention_mask)
+            head_outs[0].requires_grad_(True)
+            attention_mask = head_outs[1]
+            torch.cuda.current_stream().synchronize()
+            if self.lag_ratio > 1.0:
+                actual_compute_time = time.time() - head_fwd_start_time
+                delay_time = actual_compute_time * (self.lag_ratio - 1.0)
+                time.sleep(delay_time)
 
         # Send head outputs to server
-        torch.cuda.current_stream().synchronize()
-        if self.enable_profiling:
-            self.profile_data[batch_idx].head_fwd_send_timestamp[0] = time.time()
-        head_out_to_server = {
-            "client_id": self.client_id,
-            "batch_idx": batch_idx,
-            "activation": head_outs[0].cpu(),
-            "attention_mask": (head_outs[1].cpu() if head_outs[1] is not None else None),
-            "position_embeddings": ([ho.float().cpu() for ho in head_outs[2]] if len(head_outs) > 2 else None),
-            "is_training": True,
-            "head_fwd_start_time": head_fwd_start_time,
-        }
-        if head_out_to_server["attention_mask"] is None:
-            head_out_to_server.pop("attention_mask")
-        if head_out_to_server["position_embeddings"] is None:
-            head_out_to_server.pop("position_embeddings")
+        with self._profile_scope(batch_idx, "head_fwd_send_timestamp"):
+            head_out_to_server = {
+                "client_id": self.client_id,
+                "batch_idx": batch_idx,
+                "activation": head_outs[0].cpu(),
+                "attention_mask": (head_outs[1].cpu() if head_outs[1] is not None else None),
+                "position_embeddings": ([ho.float().cpu() for ho in head_outs[2]] if len(head_outs) > 2 else None),
+                "is_training": True,
+                "head_fwd_start_time": head_fwd_start_time,
+            }
+            if head_out_to_server["attention_mask"] is None:
+                head_out_to_server.pop("attention_mask")
+            if head_out_to_server["position_embeddings"] is None:
+                head_out_to_server.pop("position_embeddings")
 
-        mb, head_send_time = client.send(head_out_to_server)
-        if self.enable_profiling:
-            torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].head_fwd_send_timestamp[1] = time.time()
+            mb, head_send_time = client.send(head_out_to_server)
+
         server_forward_output = client.receive()
-
+        # print(f"[Client {self.client_id}] received server output batch {batch_idx}")
         # Forward pass through tail model
-        torch.cuda.current_stream().synchronize()
-        tail_start_time = time.time()
+        with self._profile_scope(batch_idx, "tail_fwd_timestamp") as tail_start_time:
+            activation_from_server = torch.tensor(
+                server_forward_output["server_activation"],
+                device=self.client_device,
+                dtype=torch.float32,
+                requires_grad=True,
+            )
+            output = self.tail_model.forward(
+                hidden_states=activation_from_server,
+                attention_mask=attention_mask,
+                position_embeddings=head_outs[2] if len(head_outs) > 2 else None,
+                labels=labels,
+            )
+            if self.lag_ratio > 1.0:
+                torch.cuda.current_stream().synchronize()  # 必须先同步，确保 forward 跑完了
+                # 使用 tail_start_time 而不是 profile_data
+                actual_compute_time = time.time() - tail_start_time
+                delay_time = actual_compute_time * (self.lag_ratio - 1.0)
+                time.sleep(delay_time)
 
-        if self.enable_profiling:
-            self.profile_data[batch_idx].tail_fwd_timestamp[0] = time.time()
-        activation_from_server = torch.tensor(
-            server_forward_output["server_activation"],
-            device=self.client_device,
-            dtype=torch.float32,
-            requires_grad=True,
-        )
-        output = self.tail_model.forward(
-            hidden_states=activation_from_server,
-            attention_mask=attention_mask,
-            position_embeddings=head_outs[2] if len(head_outs) > 2 else None,
-            labels=labels,
-        )
-        if self.lag_ratio > 1.0:
-            delay_time = (time.time() - self.profile_data[batch_idx].tail_fwd_timestamp[0]) * (self.lag_ratio - 1.0)
-            time.sleep(delay_time)
-
-        if self.enable_profiling:
-            torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].tail_fwd_timestamp[1] = time.time()
         torch.cuda.empty_cache()
         loss = output.loss
         self.avg_loss.update(loss.item())
         # self.train_logger.info(f"[Client {self.client_id}] compute loss: {loss.item()}")
 
         # Backward pass through tail model
-        if self.enable_profiling:
+        with self._profile_scope(batch_idx, "tail_bwd_timestamp") as tail_bwd_start_time:
+            loss.backward()
             torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].tail_bwd_timestamp[0] = time.time()
-        loss.backward()
-        torch.cuda.current_stream().synchronize()
-        torch.cuda.empty_cache()
-        grads_to_server = activation_from_server.grad.cpu()
-        if self.lag_ratio > 1.0:
-            delay_time = (time.time() - self.profile_data[batch_idx].tail_bwd_timestamp[0]) * (self.lag_ratio - 1.0)
-            time.sleep(delay_time)
-
-        if self.enable_profiling:
-            self.profile_data[batch_idx].tail_bwd_timestamp[1] = time.time()
+            torch.cuda.empty_cache()
+            grads_to_server = activation_from_server.grad.cpu()
+            if self.lag_ratio > 1.0:
+                actual_compute_time = time.time() - tail_bwd_start_time
+                delay_time = actual_compute_time * (self.lag_ratio - 1.0)
+                time.sleep(delay_time)
 
         # send tail gradients to server
-        if self.enable_profiling:
-            self.profile_data[batch_idx].tail_bwd_send_timestamp[0] = time.time()
-        tail_grads_to_server = {
-            "client_id": self.client_id,
-            "batch_idx": batch_idx,
-            "gradient": grads_to_server,
-            "tail_start_time": tail_start_time,
-        }
-        # time.sleep(2)
-        client.send(tail_grads_to_server)
-        if self.enable_profiling:
-            torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].tail_bwd_send_timestamp[1] = time.time()
+        with self._profile_scope(batch_idx, "tail_bwd_send_timestamp"):
+            tail_grads_to_server = {
+                "client_id": self.client_id,
+                "batch_idx": batch_idx,
+                "gradient": grads_to_server,
+                "tail_start_time": tail_start_time,
+            }
+            # time.sleep(2)
+            client.send(tail_grads_to_server)
 
-        # self.train_logger.info(f"[Client {self.client_id}] send tail_grads_to_server")
         server_backward_output = client.receive()
-        # self.train_logger.info(f"[Client {self.client_id}] receive server_gradient")
 
         # Backward pass through head model and update
-        if self.enable_profiling:
+        with self._profile_scope(batch_idx, "head_bwd_timestamp") as head_bwd_start_time:
+            grads_from_server = torch.tensor(
+                server_backward_output["server_gradient"],
+                device=self.client_device,
+                dtype=torch.float32,
+            )
+            head_outs[0].backward(grads_from_server)
             torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].head_bwd_timestamp[0] = time.time()
-        grads_from_server = torch.tensor(
-            server_backward_output["server_gradient"],
-            device=self.client_device,
-            dtype=torch.float32,
-        )
-        head_outs[0].backward(grads_from_server)
-        torch.cuda.current_stream().synchronize()
-        if self.lag_ratio > 1.0:
-            delay_time = (time.time() - self.profile_data[batch_idx].head_bwd_timestamp[0]) * (self.lag_ratio - 1.0)
-            time.sleep(delay_time)
-        if self.enable_profiling:
-            self.profile_data[batch_idx].head_bwd_timestamp[1] = time.time()
+            if self.lag_ratio > 1.0:
+                delay_time = (time.time() - head_bwd_start_time) * (self.lag_ratio - 1.0)
+                time.sleep(delay_time)
 
-        if self.enable_profiling:
+        with self._profile_scope(batch_idx, "client_step_timestamp") as client_step_start_time:
+            self.optimizer_head.step()
+            self.optimizer_tail.step()
+            self.optimizer_head.zero_grad()
+            self.optimizer_tail.zero_grad()
+
             torch.cuda.current_stream().synchronize()
-            self.profile_data[batch_idx].client_step_timestamp[0] = time.time()
-        self.optimizer_head.step()
-        self.optimizer_tail.step()
-        self.optimizer_head.zero_grad()
-        self.optimizer_tail.zero_grad()
+            if self.lag_ratio > 1.0:
+                delay_time = (time.time() - client_step_start_time) * (self.lag_ratio - 1.0)
+                time.sleep(delay_time)
 
-        torch.cuda.current_stream().synchronize()
-        if self.lag_ratio > 1.0:
-            delay_time = (time.time() - self.profile_data[batch_idx].client_step_timestamp[0]) * (self.lag_ratio - 1.0)
-            time.sleep(delay_time)
-        if self.enable_profiling:
-            self.profile_data[batch_idx].client_step_timestamp[1] = time.time()
         torch.cuda.empty_cache()
-        # self.train_logger.info(
-        #     f"[Client {self.client_id}] update model,cuda memory: {torch.cuda.memory_allocated(device=self.client_device) / 1024**3:.4f} GB"
-        # )
-        # torch.cuda.empty_cache()
 
         return loss
 
@@ -493,3 +479,35 @@ class Client(object):
                     if batch_idx % 50 == 0:
                         self.train_logger.info(f"[Client {self.client_id}] evaluating batch {batch_idx}, loss: {eval_loss.avg}")
             return eval_loss.avg
+
+    @contextmanager
+    def _profile_scope(self, batch_idx: int, attr_name: str):
+        # -------------------------------------------------------
+        # 1. 强制同步：确保 GPU 完成了之前的任务
+        # -------------------------------------------------------
+        if "cuda" in str(self.client_device):
+            torch.cuda.synchronize(self.client_device)
+
+        # -------------------------------------------------------
+        # 2. 只有同步完成后，才记录开始时间 (这就是你要的 Accurate Start Time)
+        # -------------------------------------------------------
+        start_time = time.time()
+
+        # 3. 将这个精准的开始时间 yield 给 with 语句内部
+        try:
+            yield start_time
+        finally:
+            # 4. 业务代码跑完后，再次同步并记录结束时间
+            if "cuda" in str(self.client_device):
+                torch.cuda.synchronize(self.client_device)
+            end_time = time.time()
+
+            # 5. 如果开启了 Profiling，则写入日志
+            if self.enable_profiling:
+                try:
+                    if batch_idx < len(self.profile_data):
+                        record = self.profile_data[batch_idx]
+                        getattr(record, attr_name)[0] = start_time
+                        getattr(record, attr_name)[1] = end_time
+                except Exception:
+                    pass

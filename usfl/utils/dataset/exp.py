@@ -20,7 +20,7 @@ class AverageMeter(object):  #
         self.avg = self.sum / self.count
 
 
-def register_dataset(name, dra_train_label='validation', dra_test_label='test'):
+def register_dataset(name, dra_train_label="validation", dra_test_label="test"):
     from usfl.utils.dataset.base import FedDataset
 
     def wrapper(cls):
@@ -33,17 +33,26 @@ def register_dataset(name, dra_train_label='validation', dra_test_label='test'):
     return wrapper
 
 
-def get_dataset(dataset_name, tokenizer, client_ids=None, shrink_frac=1.0, completion_only=False):
+def get_dataset(
+    dataset_name, tokenizer, client_ids=None, shrink_frac=1.0, completion_only=False, partition_mode="exclusive", sample_ratio=0.1
+):
     if client_ids is None:
         client_ids = []
-    if ',' in dataset_name:
-        dataset_names = dataset_name.split(',')
+    if "," in dataset_name:
+        dataset_names = dataset_name.split(",")
         dataset_classes = [get_dataset_class(dn) for dn in dataset_names]
         from usfl.utils.dataset.base import MixtureFedDataset
 
         return MixtureFedDataset(tokenizer, client_ids, shrink_frac, dataset_names, dataset_classes)
     else:
-        return get_dataset_class(dataset_name)(tokenizer=tokenizer, client_ids=client_ids, shrink_frac=shrink_frac, completion_only=completion_only)
+        return get_dataset_class(dataset_name)(
+            tokenizer=tokenizer,
+            client_ids=client_ids,
+            shrink_frac=shrink_frac,
+            completion_only=completion_only,
+            partition_mode=partition_mode,  # 传参
+            sample_ratio=sample_ratio,
+        )
 
 
 def get_dataset_class(dataset_name):

@@ -4,6 +4,7 @@ from copy import deepcopy
 import pandas as pd
 import torch
 from datasets import load_dataset, Dataset
+
 # from trl import DataCollatorForCompletionOnlyLM
 from usfl.utils.dataset.base import FedDataset
 from usfl import env as env_config
@@ -17,7 +18,14 @@ class PIQAFedDataset(FedDataset):
     """
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "piqa"), types=["train", "test", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "piqa"),
+            types=["train", "test", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Question:\n"
         self.a_temp = "### Solution:\n"
         if self.completion_only:
@@ -125,7 +133,14 @@ class PIQAMiniFedDataset(PIQAFedDataset):
 class STSBFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "stsb"), types=["train", "test", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "stsb"),
+            types=["train", "test", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Sentence1:\n"
         self.a_temp = "### Sentence2:\n"
 
@@ -154,7 +169,14 @@ class STSBFedDataset(FedDataset):
 class QNLIFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "qnli"), types=["train", "test", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "qnli"),
+            types=["train", "test", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Question:\n"
         self.a_temp = "### Solution:\n"
 
@@ -199,7 +221,14 @@ class QNLIFedDataset(FedDataset):
 class MRPCFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "mrpc"), types=["train", "test", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "mrpc"),
+            types=["train", "test", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Question:\n"
         self.a_temp = "### Solution:\n"
 
@@ -243,7 +272,14 @@ class MRPCFedDataset(FedDataset):
 class CoLAFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "cola"), types=["train", "test"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "cola"),
+            types=["train", "test"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
 
     def _format(self, example):
         return {"input": example["text"]}
@@ -265,7 +301,14 @@ class CoLAFedDataset(FedDataset):
 class RTEFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "rte"), types=["train", "test", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "rte"),
+            types=["train", "test", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Question:\n"
         self.a_temp = "### Solution:\n"
 
@@ -309,7 +352,14 @@ class RTEFedDataset(FedDataset):
 class GSM8KFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, load_dataset(env_config.dataset_cache_dir + "gsm8k", "main"), types=["train", "test"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            load_dataset(env_config.dataset_cache_dir + "gsm8k", "main"),  # 加载原始数据集
+            types=["train", "test"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
 
     def _format(self, example):
         q = "### Question: " + example["question"]
@@ -364,7 +414,14 @@ class GSM8KFedDataset(FedDataset):
 class DialogSumFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, load_dataset(env_config.dataset_cache_dir + "dialogsum"), ["train", "test", "validation"], shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            load_dataset(env_config.dataset_cache_dir + "dialogsum"),
+            ["train", "test", "validation"],
+            shrink_frac,
+            **kwargs
+        )
 
     def _format(self, example):
         q = "### Dialogue: " + example["dialogue"]
@@ -418,7 +475,9 @@ class DialogSumFedDataset(FedDataset):
 class CodeAlpacaFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, load_dataset(env_config.dataset_cache_dir + "CodeAlpaca_20K"), ["train", "test"], shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer, client_ids, load_dataset(env_config.dataset_cache_dir + "CodeAlpaca_20K"), ["train", "test"], shrink_frac, **kwargs
+        )
 
     def _format(self, example):
         q = "### Question: " + example["prompt"]
@@ -460,7 +519,15 @@ class CodeAlpacaFedDataset(FedDataset):
 class IMDBFedDataset(FedDataset):
 
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, load_dataset(env_config.dataset_cache_dir + "imdb"), ["train", "test", "unsupervised"], shrink_frac, num_labels=2, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            load_dataset(env_config.dataset_cache_dir + "imdb"),
+            ["train", "test", "unsupervised"],
+            shrink_frac,
+            num_labels=2,
+            **kwargs
+        )
 
     def _format(self, example):
         return {"input": example["text"]}
@@ -646,7 +713,14 @@ class ImageWoofFedDataset(FedDataset):
 @register_dataset("e2e")
 class E2EDataset(FedDataset):
     def __init__(self, tokenizer, client_ids: list[str], shrink_frac: float = 0.3, **kwargs):
-        super().__init__(tokenizer, client_ids, dataset=load_dataset(env_config.dataset_cache_dir + "e2e"), types=["train", "validation"], shrink_frac=shrink_frac, **kwargs)
+        super().__init__(
+            tokenizer,
+            client_ids,
+            dataset=load_dataset(env_config.dataset_cache_dir + "e2e"),
+            types=["train", "validation"],
+            shrink_frac=shrink_frac,
+            **kwargs
+        )
         self.q_temp = "### Context:\n"
         self.a_temp = "### Completion:\n"
 

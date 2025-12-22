@@ -97,7 +97,7 @@ def main():
     SERVER_JSON = os.path.join(dir, "server_profile_data.json")
     OUTPUT_JSON = os.path.join(dir, "server_profile_data_merged.json")  # 合并后的输出
     BACKUP_JSON = os.path.join(dir, "server_profile_data.backup.json")  # 备份
-    CLIENT_PATTERN = os.path.join(dir, "client_*_profile_data_sample.json")  # 自动发现 client_0/1/2 的文件
+    CLIENT_PATTERN = os.path.join(dir, "client_*_profile_data.json")  # 自动发现 client_0/1/2 的文件
 
     # 读取 server
     with open(SERVER_JSON, "r", encoding="utf-8") as f:

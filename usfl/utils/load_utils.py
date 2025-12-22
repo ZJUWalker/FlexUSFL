@@ -3,6 +3,7 @@ import torch.nn as nn
 from typing import Dict, Any, List
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, AutoConfig
+import transformers
 from usfl.llm import (
     load_gpt_server_model,
     load_llama_server,
@@ -79,7 +80,13 @@ def load_client(model_dir: str, client_args: Dict[str, Any], split_point: int = 
 
 
 def load_dataset(
-    dataset_name: str = "gsm8k", tokenizer: AutoTokenizer = None, client_ids: List[int] = [0], batch_size: int = 4, max_seq_len: int = 256
+    dataset_name: str = "gsm8k",
+    tokenizer: AutoTokenizer = None,
+    client_ids: List[int] = [0],
+    batch_size: int = 4,
+    max_seq_len: int = 256,
+    partition_mode: str = "exclusive",
+    sample_ratio: float = 0.1,
 ):
     # usl_dataset = get_dataset(dataset_name=dataset_name, tokenizer=tokenizer, client_ids=client_ids)
     client_dataloaders = get_client_dataloaders(
@@ -90,6 +97,8 @@ def load_dataset(
         max_seq_len=max_seq_len,
         splits=["train", "test"],
         shuffle=False,
+        partition_mode=partition_mode,
+        sample_ratio=sample_ratio,
     )
     return client_dataloaders
 

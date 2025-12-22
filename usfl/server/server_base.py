@@ -15,6 +15,7 @@ from usfl.socket import SocketCommunicator
 from usfl.utils.exp import fed_avg_params, fed_average
 from usfl.utils.timestamp_recorder import GanttChartData
 from contextlib import contextmanager
+from typing import Union, List
 
 
 @dataclass(order=True)
@@ -31,7 +32,7 @@ class ServerBase:
         num_clients: int,
         logger: logging.Logger,
         matrix_logger: logging.Logger = None,  # 下沉到 Base
-        enable_profiling: bool = False,
+        enable_profiling: bool = True,
     ):
         self.server_args = server_args
         self.server_device = server_device
@@ -90,7 +91,7 @@ class ServerBase:
         """辅助方法：统一初始化 Profile 数据，避免子类重复代码"""
         # 假设记录前 10 个 batch
         for client_id in range(self.num_clients):
-            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(10)]
+            self.profile_datas[client_id] = [GanttChartData(batch_idx=i, client_id=client_id) for i in range(101)]
 
     @abstractmethod
     def _forward(
@@ -194,7 +195,7 @@ class ServerBase:
         return False
 
     @contextmanager
-    def _profile_scope(self, client_id: int, batch_idx: int, attr_name: str):
+    def _profile_scope(self, client_id_or_ids: Union[int, List[int]], batch_idx: int, attr_name: str):
         """
         用于计时的上下文管理器。
         自动处理：开关判断、CUDA同步、时间戳记录。
@@ -205,8 +206,7 @@ class ServerBase:
             return
 
         # 2. 计时开始前操作
-        if self.server_device.type == "cuda":
-            # 使用 synchronize() 确保 GPU 操作已完成，否则计时不准
+        if torch.device(self.server_device).type == "cuda":
             torch.cuda.synchronize(self.server_device)
         start_time = time.time()
 
@@ -214,7 +214,7 @@ class ServerBase:
         yield
 
         # 4. 计时结束后操作
-        if self.server_device.type == "cuda":
+        if torch.device(self.server_device).type == "cuda":
             torch.cuda.synchronize(self.server_device)
         end_time = time.time()
 
@@ -222,10 +222,14 @@ class ServerBase:
         try:
             # 假设你的 GanttChartData 对象有对应的属性 (如 server_fwd_timestamp)
             # 且该属性是一个列表或数组 [start, end]
-            record = self.profile_datas[client_id][batch_idx]
-            timestamp_list = getattr(record, attr_name)
-            timestamp_list[0] = start_time
-            timestamp_list[1] = end_time
+            target_clients = client_id_or_ids if isinstance(client_id_or_ids, list) else [client_id_or_ids]
+
+            for cid in target_clients:
+                if cid in self.profile_datas and batch_idx < len(self.profile_datas[cid]):
+                    record = self.profile_datas[cid][batch_idx]
+                    timestamp_list = getattr(record, attr_name)
+                    timestamp_list[0] = start_time
+                    timestamp_list[1] = end_time
         except KeyError:
             # 防止 client_id 或 batch_idx 超出范围导致崩溃
             pass
