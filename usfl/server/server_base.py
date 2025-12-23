@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from functools import partial, wraps
 import socket
 import threading
 import queue
@@ -24,6 +25,29 @@ class PrioritizedItem:
     data: Any = field(compare=False)
 
 
+def see_mem(func=None, *, version='v3', device='cuda:0'):
+    # 场景 1: @see_mem(version='v2') -> func 是 None
+    if func is None:
+        # 返回一个固定了 version 的新函数，等待接收 func
+        return partial(see_mem, version=version)
+
+    # 场景 2: @see_mem -> func 是被装饰的函数
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        torch.cuda.synchronize(device)
+        mem_before = torch.cuda.memory_allocated(device) / 1024**3
+        print(f"[{version}] Memory before {func.__name__}: {mem_before:.3f} GB")
+
+        try:
+            return func(*args, **kwargs)
+        finally:
+            torch.cuda.synchronize(device)
+            mem_after = torch.cuda.memory_allocated(device) / 1024**3
+            print(f"[{version}] Memory after {func.__name__}: {mem_after:.3f} GB")
+
+    return wrapper
+
+
 class ServerBase:
     def __init__(
         self,
@@ -41,6 +65,7 @@ class ServerBase:
         self.matrix_logger = matrix_logger
 
         # --- 1. 通信与网络 ---
+        torch.cuda.set_device(self.server_device)
         self.communicator = SocketCommunicator(is_server=True, port=server_args["port"], buffer_size=65536)
         self.clients: List[Tuple[socket.socket, tuple, int]] = []
         self.client_lock = threading.Lock()

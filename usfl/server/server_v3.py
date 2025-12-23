@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, asdict
 import json
 import os
 import torch.utils.checkpoint
+from usfl.server.server_base import see_mem
 from usfl.server.server_v2 import ServerV2
 from usfl.utils.timestamp_recorder import GanttChartData
 
@@ -43,6 +44,9 @@ class ServerV3(ServerV2):
         # self.checkpoint_clients=[]
         self.server_output_dict: Dict[int, torch.Tensor] = {}  # Dict[int, torch.Tensor]
         self.hidden_status_from_head_dict: Dict[int, torch.Tensor] = {}
+        self.activation_per_batch = 0
+        self.do_ckpt_client_num = 0
+        self.device_mem_capacity = torch.cuda.get_device_properties(self.server_device).total_memory  # bytes
 
         for client_id in range(self.num_clients):
             self.server_output_dict[client_id] = None
@@ -54,18 +58,19 @@ class ServerV3(ServerV2):
             self.grad_accum_threshold = self.num_clients
         self.num_updates = 0
 
-    def _forward(
-        self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: Tuple[torch.Tensor] = None
-    ):
+    @see_mem()
+    def _forward(self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: Tuple[torch.Tensor] = None):
         try:
             hidden_status_from_head = activation.to(self.server_device)
             hidden_status_from_head.requires_grad_(True)
             hidden_status_from_head.retain_grad()
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
-            pos_emb = (
-                tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
-            )
-            if client_id < self.checkpoint_client_num:
+            pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
+            curr_mem_reserved = torch.cuda.memory_reserved()
+            if curr_mem_reserved + self.activation_per_batch >= self.device_mem_capacity:
+                print(
+                    f'do ckpt for client {client_id},curr mem reserved {curr_mem_reserved / 1024**3} GB, activation_per_batch {self.activation_per_batch / 1024**3} GB'
+                )
                 server_output = torch.utils.checkpoint.checkpoint(
                     self.trunk_model.__call__,
                     hidden_status_from_head,
@@ -73,8 +78,17 @@ class ServerV3(ServerV2):
                     pos_emb,
                     use_reentrant=False,
                 )
+                self.do_ckpt_client_num += 1
             else:
-                server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
+                if self.activation_per_batch == 0:
+                    torch.cuda.synchronize(self.server_device)
+                    curr_cuda_mem_allocated = torch.cuda.memory_allocated()
+                    server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
+                    torch.cuda.synchronize(self.server_device)
+                    self.activation_per_batch = torch.cuda.memory_allocated() - curr_cuda_mem_allocated
+                    print('activation_per_batch', self.activation_per_batch / 1024**3, 'GB')
+                else:
+                    server_output: torch.Tensor = self.trunk_model(hidden_status_from_head, attention_mask, pos_emb)
             server_output = server_output.requires_grad_(True)
             self.server_output_dict[client_id] = server_output
             self.hidden_status_from_head_dict[client_id] = hidden_status_from_head
@@ -87,6 +101,7 @@ class ServerV3(ServerV2):
             self.logger.error(f"Client {client_id}: Forward pass failed: {e}")
             raise e
 
+    @see_mem()
     def _backward(self, client_id: int, server_grad: torch.Tensor, batch_idx: int):
         try:
             with self._profile_scope(client_id, batch_idx, "server_bwd_timestamp"):
@@ -161,6 +176,7 @@ class ServerV3(ServerV2):
 
                     temp_buffer.clear()
                     self.num_updates += 1
+                    self.do_ckpt_client_num = 0
 
             except queue.Empty:
                 pass
@@ -204,6 +220,7 @@ class ServerV3(ServerV2):
 
                     self.num_accumulated_grads = 0
                     self.num_updates += 1
+                    self.do_ckpt_client_num = 0
 
             except queue.Empty:
                 pass
