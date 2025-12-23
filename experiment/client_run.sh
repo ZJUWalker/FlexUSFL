@@ -1,6 +1,6 @@
 #!/bin/bash
 
-port=9110
+port=8110
 # 定义任务配置： "数据集名 序列长度"
 # 这样写可以合并两个大循环，避免代码重复
 # configurations=("gsm8k 256" "dialogsum 512" "e2e 128")
@@ -19,7 +19,7 @@ do
         for version in "v3"
         do
             # 确保这里的模型列表与 Server 端完全一致
-            for model in "qwen/qwen3-1.7b" "meta-llama/llama3.2-1b" #"qwen/qwen3-0.6b" "meta-llama/llama3.2-1b" "qwen/qwen3-1.7b"
+            for model in "qwen/qwen3-1.7b" #"qwen/qwen3-0.6b" "meta-llama/llama3.2-1b" "qwen/qwen3-1.7b"
             do
                 # 动态设置 split_point (SP)
                 case "$model" in
@@ -29,7 +29,7 @@ do
                     *)                      current_sp=3 ;; # 默认值
                 esac
                 
-                for client_num in 32 1 2 4 8 16 
+                for client_num in 4
                 do
                     for lag_ratios_index in 0 # 0:无异质性
                     do
@@ -64,6 +64,12 @@ do
         done
     done
 done
+
+
+
+
+
+
 
 # batch_sizes=(4 6 8 6)
 # max_seq_len=128

@@ -26,7 +26,7 @@ class ServerV3(ServerV2):
         optimizer_clz: torch.optim.Optimizer.__class__ = torch.optim.AdamW,
         logger: logging.Logger = None,
         matrix_logger: logging.Logger = None,
-        enforce_sync: bool = False,
+        enforce_sync: bool = True,
     ):
 
         super().__init__(

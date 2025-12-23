@@ -1,6 +1,6 @@
 #!/bin/bash
 
-port=9110
+port=8110
 # 与 Client 端保持一致的配置顺序
 # configurations=("gsm8k" "dialogsum" "e2e") 
 configurations=("dialogsum")
@@ -12,7 +12,7 @@ do
     do
         for version in "v3"
         do
-            for model in "qwen/qwen3-1.7b" "meta-llama/llama3.2-1b" # "qwen/qwen3-0.6b" "meta-llama/llama3.2-1b" "qwen/qwen3-1.7b"
+            for model in "qwen/qwen3-1.7b"  # "qwen/qwen3-0.6b" "meta-llama/llama3.2-1b" "qwen/qwen3-1.7b"
             do
                 # 动态设置 split_point
                 case "$model" in
@@ -22,7 +22,7 @@ do
                     *)                      current_sp=3 ;;
                 esac
                 
-                for client_num in 32 1 2 4 8 16 
+                for client_num in 4
                 do
                     for lag_ratios_index in 0
                     do
@@ -36,7 +36,6 @@ do
                                 -SP=${current_sp} \
                                 -M=${model} \
                                 -P=${port} \
-                                -CKPT \
                                 -DS=${dataset} \
                                 -LAG="${lag_ratios_index}" \
                                 -QO=${qo}
