@@ -22,9 +22,8 @@ if __name__ == "__main__":
     parser.add_argument("-NC", "--num_clients", type=int, default=1, help="Number of clients")
     parser.add_argument("-BF", "--buffer_size", type=int, default=4096, help="Buffer size for socket communication")
     parser.add_argument("-SD", "--server_device", type=str, default="cuda:0", help="Device for server model")
-    parser.add_argument("-CKPT", "--use_checkpoint", action="store_true", help="Use checkpoint")
+    parser.add_argument("-CKPT", "--checkpoint_mode", type=str, default='no', help="Use checkpoint")  # no,full,selective
     parser.add_argument("-AVG", "--use_avg", action="store_true", help="Use checkpoint")
-    parser.add_argument("-SCKPT", "--checkpoint_num", type=int, default=-1, help="Number of checkpoints to use")
     parser.add_argument("-SP", "--split_point", type=int, default=3)
     parser.add_argument("-DS", "--dataset", type=str, default="gsm8k")
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
@@ -90,12 +89,13 @@ if __name__ == "__main__":
             matrix_logger=matrix_logger,
         )
     elif version == "v3":
+        checkpoint_mode = server_args["checkpoint_mode"]
         server = ServerV3(
             server_args=server_args,
             server_model=server_model,
             server_device=server_args["server_device"],
             num_clients=server_args["num_clients"],
-            checkpoint_client_num=server_args["num_clients"] if server_args["use_checkpoint"] else server_args["checkpoint_num"],
+            checkpoint_mode=checkpoint_mode,
             lr=lr,
             logger=logger,
             matrix_logger=matrix_logger,
@@ -115,14 +115,13 @@ if __name__ == "__main__":
 
     # =====================================================================
     logger.info(
-        "{} server start split point: {}, buffer size: {}B ,use lora {} ,use qlora {} ,use checkpoint {},checkpoint num {}".format(
+        "{} server start split point: {}, buffer size: {}B ,use lora {} ,use qlora {} ,use checkpoint {}".format(
             server_args["model"],
             split_point,
             server_args["buffer_size"],
             server_args["use_lora"],
             ("qlora_4bit" if server_args["use_qlora_4bit"] else "qlora_8bit" if server_args["use_qlora_8bit"] else "no_quantization"),
-            server_args["use_checkpoint"],
-            server_args["checkpoint_num"],
+            server_args["checkpoint_mode"],
         )
     )
     # =====================================================================

@@ -119,9 +119,7 @@ def main():
     parser.add_argument("-LR", "--learning_rate", type=float, default=5e-4)
     parser.add_argument("-LAG", "--lag_ratio", type=int, default=0, help="simulate client computation lag by multiplying this ratio")
     parser.add_argument("-QO", "--queue_order", type=str, default="fifo", help="queue order for clients")
-    parser.add_argument(
-        "-PM", "--partition_mode", type=str, default="random_overlap", help="partition mode for clients(exclusive or random_overlap)"
-    )
+    parser.add_argument("-PM", "--partition_mode", type=str, default="random_overlap", help="partition mode for clients(exclusive or random_overlap)")
     parser.add_argument("-SR", "--sample_ratio", type=float, default=0.2, help="sample ratio for random partition mode")
     parser.add_argument("--mode", type=str, default="main", help="main or hetero")
 

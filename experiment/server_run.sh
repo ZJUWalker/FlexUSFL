@@ -22,7 +22,7 @@ do
                     *)                      current_sp=3 ;;
                 esac
                 
-                for client_num in 4
+                for client_num in 8
                 do
                     for lag_ratios_index in 0
                     do
@@ -36,6 +36,7 @@ do
                                 -SP=${current_sp} \
                                 -M=${model} \
                                 -P=${port} \
+                                -CKPT='selective' \
                                 -DS=${dataset} \
                                 -LAG="${lag_ratios_index}" \
                                 -QO=${qo}

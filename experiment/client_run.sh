@@ -29,7 +29,7 @@ do
                     *)                      current_sp=3 ;; # 默认值
                 esac
                 
-                for client_num in 4
+                for client_num in 8
                 do
                     for lag_ratios_index in 0 # 0:无异质性
                     do

@@ -23,7 +23,7 @@ class ServerV3(ServerV2):
         server_device: torch.device,
         lr: float,
         num_clients: int,
-        checkpoint_client_num: int = -1,
+        checkpoint_mode: str = 'no',
         optimizer_clz: torch.optim.Optimizer.__class__ = torch.optim.AdamW,
         logger: logging.Logger = None,
         matrix_logger: logging.Logger = None,
@@ -40,7 +40,7 @@ class ServerV3(ServerV2):
             logger=logger,
             matrix_logger=matrix_logger,
         )
-        self.checkpoint_client_num = 0 if checkpoint_client_num <= 0 else checkpoint_client_num
+        self.checkpoint_mode = checkpoint_mode
         # self.checkpoint_clients=[]
         self.server_output_dict: Dict[int, torch.Tensor] = {}  # Dict[int, torch.Tensor]
         self.hidden_status_from_head_dict: Dict[int, torch.Tensor] = {}
@@ -58,6 +58,16 @@ class ServerV3(ServerV2):
             self.grad_accum_threshold = self.num_clients
         self.num_updates = 0
 
+    def _do_ckpt(self):
+        if self.checkpoint_mode == 'no':
+            return False
+        elif self.checkpoint_mode == 'all':
+            return True
+        elif self.checkpoint_mode == 'selective':
+            curr_mem_reserved = torch.cuda.memory_reserved()
+            return curr_mem_reserved + self.activation_per_batch >= self.device_mem_capacity
+        return False
+
     @see_mem()
     def _forward(self, client_id: int, activation: torch.Tensor, attention_mask: torch.LongTensor, position_embeddings: Tuple[torch.Tensor] = None):
         try:
@@ -66,10 +76,9 @@ class ServerV3(ServerV2):
             hidden_status_from_head.retain_grad()
             attention_mask = attention_mask.to(self.server_device) if attention_mask is not None else None
             pos_emb = tuple(torch.tensor(pos).to(self.server_device) for pos in position_embeddings) if position_embeddings is not None else None
-            curr_mem_reserved = torch.cuda.memory_reserved()
-            if curr_mem_reserved + self.activation_per_batch >= self.device_mem_capacity:
+            if self._do_ckpt():
                 print(
-                    f'do ckpt for client {client_id},curr mem reserved {curr_mem_reserved / 1024**3} GB, activation_per_batch {self.activation_per_batch / 1024**3} GB'
+                    f'do ckpt for client {client_id},curr mem reserved {torch.cuda.memory_reserved() / 1024**3} GB, activation_per_batch {self.activation_per_batch / 1024**3} GB'
                 )
                 server_output = torch.utils.checkpoint.checkpoint(
                     self.trunk_model.__call__,
